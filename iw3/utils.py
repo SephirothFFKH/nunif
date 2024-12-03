@@ -328,6 +328,11 @@ def make_video_codec_option(args):
         elif args.video_codec in {"hevc_nvenc", "h264_nvenc"}:
             options["rc"] = "constqp"
             options["qp"] = str(args.crf)
+            if args.pix_fmt == "p016le":
+                options["profile"] = "main10"
+                options["tier"] = "high"
+                options["highbitdepth"] = "1"
+                options["split_encode_mode"] = "1"
     else:
         options = {}
 
