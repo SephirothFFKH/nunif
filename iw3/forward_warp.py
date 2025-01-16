@@ -16,10 +16,9 @@ def blur_blend(x, mask):
 
 
 def shift_fill(x, max_tries=100):
-    # TODO: If holes exist between different depth layers, they are not masked and may cause artifact
     mask = x < 0
     shift = 1
-    while mask.sum() > 0 and max_tries > 0:
+    while mask.any().item() and max_tries > 0:
         if shift > 0:
             x[mask] = F.pad(x[:, :, :, 1:], (0, 1, 0, 0))[mask]
         else:
@@ -27,6 +26,26 @@ def shift_fill(x, max_tries=100):
         mask = x < 0
         shift = 0 if shift == 1 else 1
         max_tries = max_tries - 1
+
+    return x
+
+
+def fix_layered_holes(side_image, index_image, sign, max_tries=100):
+    # NOTE: I still don't understand what it means to separate by sign(left/right), but this works.
+    if sign > 0:
+        mask = F.pad((index_image[:, :, :, :-1] - index_image[:, :, :, 1:]) > 0, (0, 1, 0, 0))
+        while mask.any().item() and max_tries > 0:
+            side_image[mask.expand_as(side_image)] = -1  # set undefined value
+            index_image[mask] = F.pad(index_image[:, :, :, 1:], (0, 1, 0, 0))[mask]
+            mask = F.pad((index_image[:, :, :, :-1] - index_image[:, :, :, 1:]) > 0, (0, 1, 0, 0))
+            max_tries -= 1
+    else:
+        mask = F.pad((index_image[:, :, :, :-1] - index_image[:, :, :, 1:]) > 0, (1, 0, 0, 0))
+        while mask.any().item() and max_tries > 0:
+            side_image[mask.expand_as(side_image)] = -1
+            index_image[mask] = F.pad(index_image[:, :, :, :-1], (1, 0, 0, 0))[mask]
+            mask = F.pad((index_image[:, :, :, :-1] - index_image[:, :, :, 1:]) > 0, (1, 0, 0, 0))
+            max_tries -= 1
 
 
 def to_flat_index(batch, width, height, index):
@@ -116,23 +135,32 @@ def depth_order_bilinear_forward_warp(c, depth, divergence, convergence, fill=Tr
     x_index = torch.arange(0, W, device=c.device).view(1, 1, W).expand(B, H, W)
     src_index = to_flat_index(B, W, H, x_index)
     index_order = torch.argsort(depth.view(-1), dim=0)
+
+    c = torch.cat([c, x_index.view(B, 1, H, W).to(c.dtype)], dim=1)  # warp width index together
     left_eye = warp(B, W, H, c, x_index, index_shift, src_index, index_order)
     right_eye = warp(B, W, H, c, x_index, -index_shift, src_index, index_order)
 
     # unpad
     left_eye = unpad(left_eye)
     right_eye = unpad(right_eye)
+    left_eye, left_eye_index = left_eye[:, :-1, :, ], left_eye[:, -1:, :, ]
+    right_eye, right_eye_index = right_eye[:, :-1, :, ], right_eye[:, -1:, :, ]
+
+    # Fix layered holes
+    # inspired by @math-artist patch: https://github.com/nagadomi/nunif/discussions/274
+    left_eye_index, right_eye_index = shift_fill(torch.cat([left_eye_index, right_eye_index], dim=1)).chunk(2, dim=1)
+    fix_layered_holes(left_eye, left_eye_index, 1)
+    fix_layered_holes(right_eye, right_eye_index, -1)
 
     if fill:
         # super simple inpainting
-        shift_fill(left_eye)
-        shift_fill(right_eye)
+        left_eye, right_eye = shift_fill(torch.cat([left_eye, right_eye], dim=1)).chunk(2, dim=1)
     else:
         # drop undefined values
         left_eye = torch.clamp(left_eye, 0, 1)
         right_eye = torch.clamp(right_eye, 0, 1)
 
-    return left_eye, right_eye
+    return left_eye.contiguous(), right_eye.contiguous()
 
 
 def apply_divergence_forward_warp(c, depth, divergence, convergence, method=None):
@@ -141,21 +169,41 @@ def apply_divergence_forward_warp(c, depth, divergence, convergence, method=None
         return depth_order_bilinear_forward_warp(c, depth, divergence, convergence, fill=fill)
 
 
-if __name__ == "__main__":
-    # 400 FPS on RTX3070Ti
+def _bench():
     import time
+    import torchvision.transforms.functional as TF
+    from nunif.modules.gaussian_filter import GaussianFilter2d
+
     device = "cuda:0"
     B = 4
     N = 100
+    S = (512, 512)    # 230 FPS on RTX3070Ti
+    # S = (1080, 1920)  # HD, 22FPS and 600MB*batch_size VRAM
 
-    rgb = torch.zeros((B, 3, 512, 512)).to(device)
-    depth = torch.rand((B, 1, 512, 512)).to(device)
-    divergence = 2.0
+    rgb = torch.zeros((B, 3, *S)).to(device)
+    # This test depth should call shift_fill and fix_layered_holes 5-10 times
+    smooth = GaussianFilter2d(1, kernel_size=7, padding=1).to(device)
+    depth = torch.zeros((B, 1, *S)).to(device)
+    depth[:, :, 128:-128, 128:-128] = 1.0
+    depth[:, :, :, 250:-250] = 0
+    depth[:, :, :, 280:-230] = 0
+    depth = smooth(depth)
+
+    # TF.to_pil_image(depth[0]).show()
+    divergence = 10.0
     convergence = 0.5
 
     # benchmark
+    apply_divergence_forward_warp(rgb, depth, divergence, convergence, method="forward_fill")
+    torch.cuda.synchronize()
     t = time.time()
     for _ in range(N):
-        apply_divergence_forward_warp(rgb, depth, divergence, convergence, method="forward")
+        apply_divergence_forward_warp(rgb, depth, divergence, convergence, method="forward_fill")
     torch.cuda.synchronize()
     print(1 / ((time.time() - t) / (B * N)), "FPS")
+    max_vram_mb = int(torch.cuda.max_memory_allocated(device) / (1024 * 1024))
+    print(f"GPU Max Memory Allocated {max_vram_mb}MB")
+
+
+if __name__ == "__main__":
+    _bench()

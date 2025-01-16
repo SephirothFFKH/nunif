@@ -4,7 +4,7 @@ call .\venv\Scripts\activate
 pip install --upgrade --no-cache-dir -r requirements-torch.txt
 pip install --upgrade --no-cache-dir -r requirements.txt
 pip install --upgrade --no-cache-dir -r requirements-gui.txt
-if exist "av-13.1.0-cp312-cp312-win_amd64.whl" (
+if exist "av-14.0.0-cp312-cp312-win_amd64.whl" (
   pip install --upgrade --no-cache-dir -r requirements-pyav.txt
 )
 python -m waifu2x.download_models

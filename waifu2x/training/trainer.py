@@ -46,47 +46,26 @@ LOSS_FUNCTIONS = {
     "lbpm": lambda: MultiscaleLoss(YLBP(), mode="avg"),
     "lbp5": lambda: YLBP(kernel_size=5),
     "lbp5m": lambda: MultiscaleLoss(YLBP(kernel_size=5), mode="avg"),
-    "rgb_l1lbp": lambda: YRGBL1LBP(kernel_size=3, weight=0.4),
-    "rgb_l1lbp5": lambda: YRGBL1LBP(kernel_size=5, weight=0.4),
-    "rgb_flatlbp5": lambda: YRGBFlatLBP(kernel_size=5, weight=0.4),
-    "rgb_lbp5": lambda: YRGBLBP(kernel_size=5),
 
-    "dct24lbp5": lambda: WeightedLoss(
-        (DCTLoss(window_size=24, clamp=True, random_instance_rotate=True),
-         YRGBLBP(kernel_size=5)),
-        weights=(0.6, 0.4)),
+    "yrgb_l1lbp5": lambda: YRGBL1LBP(kernel_size=5, weight=0.4),
+    "yrgb_flatlbp5": lambda: YRGBFlatLBP(kernel_size=5, weight=0.4),
+    "yrgb_lbp5": lambda: YRGBLBP(kernel_size=5),
+    "yrgb_lbp": lambda: YRGBLBP(kernel_size=3),
 
     "alex11": lambda: ClampLoss(LuminanceWeightedLoss(Alex11Loss(in_channels=1))),
     "y_l1fftgrad": lambda: YRGBL1FFTGradientLoss(fft_weight=0.1, grad_weight=0.1, diag=False),
-    "dct": lambda: DCTLoss(clamp=True),
-    "dct4": lambda: DCTLoss(window_size=4, clamp=True),
-    "dct8": lambda: DCTLoss(window_size=8, clamp=True),
 
-    "dctm": lambda: WeightedLoss((DCTLoss(window_size=4, clamp=True),
-                                  DCTLoss(window_size=24, clamp=True),
-                                  DCTLoss(clamp=True)),
-                                 (0.2, 0.2, 0.6)),
-    "dctdm": lambda: WeightedLoss((DCTLoss(window_size=4, clamp=True),
-                                   DCTLoss(window_size=24, clamp=True, diag=True),
-                                   DCTLoss(clamp=True, diag=True)),
-                                  (0.2, 0.2, 0.6)),
-    "dctrm": lambda: WeightedLoss(
-        (DCTLoss(window_size=4, clamp=True),
-         DCTLoss(window_size=24, clamp=True, random_rotate=True),
-         DCTLoss(clamp=True, random_rotate=True)),
-        weights=(0.2, 0.2, 0.6),
-        preprocess_pair=DiffPairRandomTranslate(size=12, padding_mode="zeros", expand=True)),
+    "dct": lambda: DCTLoss(clamp=True),
     "dctirm": lambda: WeightedLoss(
         (DCTLoss(window_size=4, clamp=True),
          DCTLoss(window_size=24, clamp=True, random_instance_rotate=True),
          DCTLoss(clamp=True, random_instance_rotate=True)),
         weights=(0.2, 0.2, 0.6),
         preprocess_pair=DiffPairRandomTranslate(size=12, padding_mode="zeros", expand=True, instance_random=True)),
-    "dctrm4-24": lambda: WeightedLoss(
-        (DCTLoss(window_size=4, clamp=True),
-         DCTLoss(window_size=24, clamp=True, random_rotate=True)),
-        weights=(0.4, 0.6),
-        preprocess_pair=DiffPairRandomTranslate(size=12, padding_mode="zeros", expand=True)),
+    "dctir24": lambda: WeightedLoss(
+        (DCTLoss(window_size=24, clamp=True, random_rotate=True, overlap=True),),
+        weights=(1.0,),
+        preprocess_pair=DiffPairRandomTranslate(size=12, padding_mode="zeros", expand=True, instance_random=True)),
 
     "aux_lbp": lambda: AuxiliaryLoss((YLBP(), YLBP()), weight=(1.0, 0.5)),
     "aux_alex11": lambda: AuxiliaryLoss((
@@ -182,6 +161,30 @@ def inf_loss():
     return float(-time() / 1000000000)
 
 
+def fit_size(z, y):
+    if isinstance(z, (tuple, list)):
+        if z[0].shape[2] != y.shape[2] or z[0].shape[3] != y.shape[3]:
+            pad_h = (y.shape[2] - z[0].shape[2]) // 2
+            pad_w = (y.shape[3] - z[0].shape[3]) // 2
+            assert pad_h >= 0 or pad_w >= 0
+            y = torch.nn.functional.pad(y, (-pad_w, -pad_w, -pad_h, -pad_h))
+    else:
+        if z.shape[2] != y.shape[2] or z.shape[3] != y.shape[3]:
+            pad_h = (y.shape[2] - z.shape[2]) // 2
+            pad_w = (y.shape[3] - z.shape[3]) // 2
+            assert pad_h >= 0 or pad_w >= 0
+            y = torch.nn.functional.pad(y, (-pad_w, -pad_w, -pad_h, -pad_h))
+
+    return z, y
+
+
+def to_dtype(x, dtype):
+    if isinstance(x, (tuple, list)):
+        return [xx.to(dtype) for xx in x]
+    else:
+        return x.to(dtype)
+
+
 class Waifu2xEnv(LuminancePSNREnv):
     def __init__(self, model, criterion,
                  discriminator,
@@ -272,9 +275,11 @@ class Waifu2xEnv(LuminancePSNREnv):
         with self.autocast():
             if self.discriminator is None:
                 if not self.trainer.args.privilege:
-                    z = self.model(x)
+                    z = to_dtype(self.model(x), x.dtype)
+                    z, y = fit_size(z, y)
                 else:
-                    z = self.model(x, self.to_device(privilege))
+                    z = to_dtype(self.model(x, self.to_device(privilege)), x.dtype)
+                    z, y = fit_size(z, y)
                 if isinstance(z, (list, tuple)) and self.use_diff_aug:
                     raise ValueError(f"--diff-aug does not support {self.model.name}")
                 z, y = self.diff_aug(z, y)
@@ -285,9 +290,11 @@ class Waifu2xEnv(LuminancePSNREnv):
                     # generator (sr) step
                     self.discriminator.requires_grad_(False)
                     if not self.trainer.args.privilege:
-                        z = self.model(x)
+                        z = to_dtype(self.model(x), x.dtype)
+                        z, y = fit_size(z, y)
                     else:
-                        z = self.model(x, self.to_device(privilege))
+                        z = to_dtype(self.model(x, self.to_device(privilege)), x.dtype)
+                        z, y = fit_size(z, y)
                     if isinstance(z, (list, tuple)):
                         # NOTE: models using auxiliary loss return tuple.
                         #       first element is SR result.
@@ -297,8 +304,7 @@ class Waifu2xEnv(LuminancePSNREnv):
                     else:
                         z, y = self.diff_aug(z, y)
                         fake = z
-
-                    z_real = self.discriminator(torch.clamp(fake, 0, 1), y, scale_factor)
+                    z_real = to_dtype(self.discriminator(torch.clamp(fake, 0, 1), y, scale_factor), fake.dtype)
                     recon_loss = self.criterion(z, y)
                     generator_loss = self.discriminator_criterion(z_real)
                     self.sum_p_loss += recon_loss.item()
@@ -310,7 +316,8 @@ class Waifu2xEnv(LuminancePSNREnv):
                     recon_loss = recon_loss * self.trainer.args.reconstruction_loss_scale
                 else:
                     with torch.inference_mode():
-                        z = self.model(x)
+                        z = to_dtype(self.model(x), x.dtype)
+                        z, y = fit_size(z, y)
                         fake = z[0] if isinstance(z, (list, tuple)) else z
                     recon_loss = generator_loss = torch.zeros(1, dtype=x.dtype, device=x.device)
 
@@ -340,6 +347,8 @@ class Waifu2xEnv(LuminancePSNREnv):
                         z_real = self.discriminator(y, y, scale_factor)
                     fake_ss_loss = real_ss_loss = 0
 
+                z_fake = to_dtype(z_fake, fake.dtype)
+                z_real = to_dtype(z_real, y.dtype)
                 discriminator_loss = (self.discriminator_criterion(z_real, z_fake) +
                                       (real_ss_loss + fake_ss_loss) * 0.5)
 
@@ -355,15 +364,14 @@ class Waifu2xEnv(LuminancePSNREnv):
         else:
             # NOTE: Ignore `update` flag,
             #       gradient accumulation does not work with Discriminator.
-
-            recon_loss, generator_loss, d_loss = loss
+            backward_step = self.trainer.args.backward_step
+            recon_loss, generator_loss, d_loss = [val * backward_step for val in loss]
             g_opt, d_opt = optimizers
             optimizers = []
 
             # update generator
             disc_skip_prob = self.calc_discriminator_skip_prob(d_loss)
             if not self.trainer.args.discriminator_only:
-                g_opt.zero_grad()
                 last_layer = get_last_layer(self.model)
                 weight = self.calculate_adaptive_weight(
                     recon_loss, generator_loss, last_layer, grad_scaler,
@@ -397,7 +405,7 @@ class Waifu2xEnv(LuminancePSNREnv):
                     g_loss = recon_loss * recon_weight * 0.5
                 self.sum_loss += g_loss.item()
                 self.sum_d_weight += weight
-                self.backward(g_loss, grad_scaler)
+                self.backward(g_loss / backward_step, grad_scaler)
                 optimizers.append(g_opt)
 
                 logger.debug(f"recon: {round(recon_loss.item(), 4)}, gen: {round(generator_loss.item(), 4)}, "
@@ -405,12 +413,11 @@ class Waifu2xEnv(LuminancePSNREnv):
                              f"disc skip: {round(disc_skip_prob, 3)}")
 
             # update discriminator
-            d_opt.zero_grad()
             if not (random.uniform(0., 1.) < disc_skip_prob):
-                self.backward(d_loss, grad_scaler)
+                self.backward(d_loss / backward_step, grad_scaler)
                 optimizers.append(d_opt)
 
-            if optimizers:
+            if optimizers and update:
                 self.optimizer_step(optimizers, grad_scaler)
 
     def train_end(self):
@@ -454,6 +461,7 @@ class Waifu2xEnv(LuminancePSNREnv):
         with self.autocast():
             if self.trainer.args.update_criterion in {"psnr", "all"}:
                 z = model(x)
+                z, y = fit_size(z, y)
                 psnr = self.eval_criterion(z, y)
                 if self.trainer.args.update_criterion == "psnr":
                     loss = psnr
@@ -461,6 +469,7 @@ class Waifu2xEnv(LuminancePSNREnv):
                     loss = torch.tensor(inf_loss())
             elif self.trainer.args.update_criterion == "loss":
                 z = model(x)
+                z, y = fit_size(z, y)
                 # TODO: AuxiliaryLoss does not work
                 psnr = self.eval_criterion(z, y)
                 loss = self.criterion(z, y)
@@ -587,7 +596,6 @@ class Waifu2xTrainer(Trainer):
                 da_no_rotate=self.args.da_no_rotate,
                 da_cutmix_p=self.args.da_cutmix_p,
                 da_mixup_p=self.args.da_mixup_p,
-                fixed_deblur=self.args.fixed_deblur,
                 deblur=self.args.deblur,
                 resize_blur_range=self.args.resize_blur_range,
                 resize_blur_p=self.args.resize_blur_p,
@@ -617,7 +625,6 @@ class Waifu2xTrainer(Trainer):
                 style=self.args.style,
                 noise_level=self.args.noise_level,
                 tile_size=self.args.size,
-                fixed_deblur=self.args.fixed_deblur,
                 deblur=self.args.deblur,
                 resize_blur_range=self.args.resize_blur_range,
                 return_no_offset_y=False,
@@ -713,6 +720,8 @@ def train(args):
             args.loss = "lbp5"
         elif args.arch in {"waifu2x.swin_unet_8x"}:
             args.loss = "y_charbonnier"
+        elif args.arch.startswith("waifu2x.winc_unet"):
+            args.loss = "dctirm"
         else:
             args.loss = "y_charbonnier"
 
@@ -788,18 +797,15 @@ def register(subparsers, default_parser):
     parser.add_argument("--da-mixup-p", type=float, default=0.0,
                         help="random mixup(overlay) data augmentation for gt image")
 
-    parser.add_argument("--fixed-deblur", type=float, default=0.0,
-                        help=("fixed shift parameter of resize blur."
-                              "deblur = 1 + fixed_deblur"))
     parser.add_argument("--deblur", type=float, default=0.0,
                         help=("shift parameter of random resize blur."
                               " 0.0-0.05 is a reasonable value. "
                               "see --resize-blur-range for details"))
     parser.add_argument("--resize-blur-range", type=float, nargs="+", default=[0.05],
                         help=("max shift of random resize blur."
-                              " blur = 1 + fixed_deblur + uniform(-resize_blur_range + deblur, resize_blur_range + deblur)."
+                              " blur = 1 + uniform(-resize_blur_range + deblur, resize_blur_range + deblur)."
                               " or "
-                              " blur = 1 + fixed_deblur + uniform(resize_blur_range[0] + deblur, resize_blur_range[1] + deblur)."
+                              " blur = 1 + uniform(resize_blur_range[0] + deblur, resize_blur_range[1] + deblur)."
                               " blur >= 1 is blur, blur <= 1 is sharpen. mean 1 by default"))
     parser.add_argument("--resize-blur-p", type=float, default=0.1,
                         help=("probability that resize blur should be used"))
@@ -873,8 +879,9 @@ def register(subparsers, default_parser):
         learning_rate_cycles=5,
         learning_rate_decay=0.995,
         learning_rate_decay_step=[1],
-        # for adamw
+        # for adamw cosine_wd
         weight_decay=0.001,
+        weight_decay_end=0.01,
     )
     parser.set_defaults(handler=train)
 

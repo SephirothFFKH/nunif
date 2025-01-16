@@ -317,14 +317,14 @@ def structured_noise(x, strength=0.15):
 NR_RATE = {
     0: 0.1,
     1: 0.1,
-    2: 0.5,
-    3: 0.95,
+    2: 0.9,
+    3: 0.9,
 }
 STRENGTH_FACTOR = {
     0: 0.25,
     1: 0.5,
-    2: 1.0,
-    3: 1.2,
+    2: 1.2,
+    3: 1.8,
 }
 
 
@@ -338,7 +338,7 @@ class RandomPhotoNoiseX():
         noise_level = self.noise_level
         if not self.force:
             if random.uniform(0, 1) > NR_RATE[noise_level]:
-                cond = list(range(-1, noise_level - 1))
+                cond = list(range(-1, noise_level))
                 prob = [i for i in range(1, len(cond) + 1)]
                 noise_level = random.choices(cond, prob, k=1)[0]
                 if noise_level == -1:
@@ -386,10 +386,11 @@ def add_validation_noise(x, noise_level, index):
         if index % 10 == 0:
             x = _add_gaussian_noise(x, 0.05 * STRENGTH_FACTOR[noise_level])
     elif noise_level == 2:
-        if index % 2 == 0:
+        if index % 10 != 0:
             x = _add_gaussian_noise(x, 0.05 * STRENGTH_FACTOR[noise_level])
     elif noise_level == 3:
-        x = _add_gaussian_noise(x, 0.05 * STRENGTH_FACTOR[noise_level])
+        if index % 10 != 0:
+            x = _add_gaussian_noise(x, 0.05 * STRENGTH_FACTOR[noise_level])
     return x
 
 

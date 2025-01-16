@@ -1,5 +1,6 @@
 import av
 from av.video.reformatter import ColorRange, Colorspace
+from packaging import version as packaging_version
 import os
 from os import path
 import math
@@ -10,6 +11,7 @@ import re
 import torch
 from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
+import time
 
 
 # Add video mimetypes that does not exist in mimetypes
@@ -51,9 +53,11 @@ ADDITIONAL_COLORSPACE_VALUES = {
     "SMPTE240M_2": 7,  # smpte240m is defined as 5 in libsws
     "BT2020": 9,
 }
-for name, value in ADDITIONAL_COLORSPACE_VALUES.items():
-    if getattr(Colorspace, "_by_value") and getattr(Colorspace, "_create") and value not in Colorspace._by_value:
-        Colorspace._create(name, value)
+AV_VERSION_14 = packaging_version.parse(av.__version__).major >= 14
+if not AV_VERSION_14:
+    for name, value in ADDITIONAL_COLORSPACE_VALUES.items():
+        if getattr(Colorspace, "_by_value") and getattr(Colorspace, "_create") and value not in Colorspace._by_value:
+            Colorspace._create(name, value)
 
 
 COLORSPACE_UNSPECIFIED = 2
@@ -62,6 +66,14 @@ COLORSPACE_SMPTE240M = 7
 COLORSPACE_BT2020 = 9
 KNOWN_COLORSPACES = {Colorspace.ITU601.value, Colorspace.ITU709.value,
                      COLORSPACE_SMPTE170M, COLORSPACE_SMPTE240M, COLORSPACE_BT2020}
+
+
+def add_stream_from_template(container, template):
+    # wrapper for av >= 14 compatibility
+    if AV_VERSION_14:
+        return container.add_stream_from_template(template)
+    else:
+        return container.add_stream(template=template)
 
 
 def is_bt709(stream):
@@ -237,9 +249,10 @@ class VideoOutputConfig():
     def __init__(self, pix_fmt="yuv420p", fps=30, options={}, container_options={},
                  output_width=None, output_height=None, colorspace=None,
                  container_format=None,
-                 video_codec=None):
+                 video_codec=None, output_fps=None):
         self.pix_fmt = pix_fmt
         self.fps = fps
+        self.output_fps = output_fps
         self.options = options
         self.container_options = container_options
         self.output_width = output_width
@@ -600,6 +613,19 @@ def configure_video_codec(config):
             config.pix_fmt = "gbrp"
 
 
+def try_replace(output_path_tmp, output_path):
+    try_count = 4
+    while try_count >= 0:
+        try:
+            os.replace(output_path_tmp, output_path)
+            break
+        except: # noqa
+            time.sleep(2)
+            try_count -= 1
+            if try_count <= 0:
+                raise
+
+
 def process_video(input_path, output_path,
                   frame_callback,
                   config_callback=default_config_callback,
@@ -639,6 +665,7 @@ def process_video(input_path, output_path,
 
     config = config_callback(video_input_stream)
     config.fps = convert_known_fps(config.fps)
+    config.output_fps = convert_known_fps(config.output_fps)
 
     if not config.container_format:
         config.container_format = path.splitext(output_path)[-1].lower()[1:]
@@ -656,7 +683,8 @@ def process_video(input_path, output_path,
             test_callback = frame_callback
         output_size = test_output_size(test_callback, video_input_stream, vf)
 
-    video_output_stream = output_container.add_stream(config.video_codec, config.fps)
+    output_fps = config.output_fps or config.fps
+    video_output_stream = output_container.add_stream(config.video_codec, output_fps)
     configure_colorspace(video_output_stream, video_input_stream, config)
     video_output_stream.thread_type = "AUTO"
     video_output_stream.pix_fmt = config.pix_fmt
@@ -682,7 +710,7 @@ def process_video(input_path, output_path,
             audio_copy = False
         else:
             try:
-                audio_output_stream = output_container.add_stream(template=audio_input_stream)
+                audio_output_stream = add_stream_from_template(output_container, template=audio_input_stream)
                 audio_copy = True
             except ValueError:
                 audio_output_stream = output_container.add_stream(default_acodec, audio_input_stream.rate)
@@ -705,7 +733,7 @@ def process_video(input_path, output_path,
     ncols = len(desc) + 60
     tqdm_fn = tqdm_fn or tqdm
     # TODO: `total` may be less when start_time is specified
-    total = guess_frames(video_input_stream, config.fps, start_time=start_time, end_time=end_time,
+    total = guess_frames(video_input_stream, output_fps, start_time=start_time, end_time=end_time,
                          container_duration=container_duration)
     pbar = tqdm_fn(desc=desc, total=total, ncols=ncols)
     streams = [video_input_stream] + [s[0] for s in audio_output_streams] + [s[0] for s in subtitle_output_streams]
@@ -784,7 +812,7 @@ def process_video(input_path, output_path,
     if not (stop_event is not None and stop_event.is_set()):
         # success
         if path.exists(output_path_tmp):
-            os.replace(output_path_tmp, output_path)
+            try_replace(output_path_tmp, output_path)
 
 
 def generate_video(output_path,
@@ -827,7 +855,7 @@ def generate_video(output_path,
                 audio_copy = False
             else:
                 try:
-                    audio_output_stream = output_container.add_stream(template=audio_input_stream)
+                    audio_output_stream = add_stream_from_template(output_container, template=audio_input_stream)
                     audio_copy = True
                 except ValueError:
                     audio_output_stream = output_container.add_stream("aac", audio_input_stream.rate)
@@ -899,7 +927,7 @@ def generate_video(output_path,
     if not (stop_event is not None and stop_event.is_set()):
         # success
         if path.exists(output_path_tmp):
-            os.replace(output_path_tmp, output_path)
+            try_replace(output_path_tmp, output_path)
 
 
 def process_video_keyframes(input_path, frame_callback, min_interval_sec=4., title=None, stop_event=None, suspend_event=None):
@@ -1037,7 +1065,7 @@ def export_audio(input_path, output_path, start_time=None, end_time=None,
         audio_copy = False
     else:
         try:
-            audio_output_stream = output_container.add_stream(template=audio_input_stream)
+            audio_output_stream = add_stream_from_template(output_container, template=audio_input_stream)
             audio_copy = True
         except ValueError:
             audio_output_stream = output_container.add_stream("aac", audio_input_stream.rate)

@@ -1,5 +1,6 @@
 import os
 from os import path
+import warnings
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -10,6 +11,7 @@ import threading
 import math
 from tqdm import tqdm
 from PIL import ImageDraw
+from nunif.initializer import gc_collect
 from nunif.utils.image_loader import ImageLoader
 from nunif.utils.pil_io import load_image_simple
 from nunif.models import load_model  # , compile_model
@@ -224,6 +226,7 @@ FULL_SBS_SUFFIX = "_LRF_Full_SBS"
 HALF_SBS_SUFFIX = "_LR"
 FULL_TB_SUFFIX = "_TBF_fulltb"
 HALF_TB_SUFFIX = "_TB"
+CROSS_EYED_SUFFIX = "_RLF_cross"
 
 VR180_SUFFIX = "_180x180_LR"
 ANAGLYPH_SUFFIX = "_redcyan"
@@ -246,6 +249,8 @@ def make_output_filename(input_filename, args, video=False):
         auto_detect_suffix = FULL_TB_SUFFIX
     elif args.half_tb:
         auto_detect_suffix = HALF_TB_SUFFIX
+    elif args.cross_eyed:
+        auto_detect_suffix = CROSS_EYED_SUFFIX
     elif args.anaglyph:
         auto_detect_suffix = ANAGLYPH_SUFFIX + f"_{args.anaglyph}"
     elif args.debug_depth:
@@ -260,8 +265,8 @@ def make_output_filename(input_filename, args, video=False):
         return s
 
     if args.metadata == "filename":
-        if args.zoed_height:
-            resolution = f"{args.zoed_height}_"
+        if args.resolution:
+            resolution = f"{args.resolution}_"
         else:
             resolution = ""
         if args.tta:
@@ -285,22 +290,23 @@ def make_video_codec_option(args):
     if args.video_codec in {"libx264", "libx265", "hevc_nvenc", "h264_nvenc"}:
         options = {"preset": args.preset, "crf": str(args.crf)}
 
-        if args.tb or args.half_tb:
-            options["frame-packing"] = "4"
-        elif not args.anaglyph:
-            options["frame-packing"] = "3"
-
         if args.tune:
             options["tune"] = ",".join(set(args.tune))
 
         if args.profile_level:
-            options["level"] = args.profile_level
+            options["level"] = str(int(float(args.profile_level) * 10))
 
         if args.video_codec == "libx265":
             x265_params = ["log-level=warning", "high-tier=enabled"]
             if args.profile_level:
                 x265_params.append(f"level-idc={int(float(args.profile_level) * 10)}")
             options["x265-params"] = ":".join(x265_params)
+        elif args.video_codec == "libx264":
+            # TODO:
+            # if args.tb or args.half_tb:
+            #    options["x264-params"] = "frame-packing=4"
+            if args.half_sbs:
+                options["x264-params"] = "frame-packing=3"
         elif args.video_codec in {"hevc_nvenc", "h264_nvenc"}:
             options["rc"] = "constqp"
             options["qp"] = str(args.crf)
@@ -468,8 +474,11 @@ def postprocess_image(left_eye, right_eye, args):
         sbs = apply_anaglyph_redcyan(left_eye, right_eye, args.anaglyph)
     elif args.tb or args.half_tb:
         # TopBottom
-        # SideBySide
         sbs = torch.cat([left_eye, right_eye], dim=1)
+        sbs = torch.clamp(sbs, 0., 1.)
+    elif args.cross_eyed:
+        # Reverse SideBySide
+        sbs = torch.cat([right_eye, left_eye], dim=2)
         sbs = torch.clamp(sbs, 0., 1.)
     else:
         # SideBySide
@@ -658,7 +667,7 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                          start_time=args.start_time,
                          end_time=args.end_time)
     else:
-        minibatch_size = args.zoed_batch_size // 2 or 1 if args.tta else args.zoed_batch_size
+        minibatch_size = args.batch_size // 2 or 1 if args.tta else args.batch_size
         preprocess_lock = [threading.Lock() for _ in range(len(args.state["devices"]))]
         depth_lock = [threading.Lock() for _ in range(len(args.state["devices"]))]
         sbs_lock = [threading.Lock() for _ in range(len(args.state["devices"]))]
@@ -935,7 +944,7 @@ def export_video(args):
     os.makedirs(depth_dir, exist_ok=True)
 
     if args.resume:
-        resume_seq = get_resume_seq(depth_dir, rgb_dir) - args.zoed_batch_size
+        resume_seq = get_resume_seq(depth_dir, rgb_dir) - args.batch_size
     else:
         resume_seq = -1
 
@@ -968,7 +977,7 @@ def export_video(args):
 
         return video_output_config
 
-    minibatch_size = args.zoed_batch_size // 2 or 1 if args.tta else args.zoed_batch_size
+    minibatch_size = args.batch_size // 2 or 1 if args.tta else args.batch_size
     preprocess_lock = [threading.Lock() for _ in range(len(args.state["devices"]))]
     depth_lock = [threading.Lock() for _ in range(len(args.state["devices"]))]
     streams = threading.local()
@@ -1101,7 +1110,7 @@ def process_config_video(config, args, side_model):
         frame = batch_callback(rgb.unsqueeze(0), depth.unsqueeze(0))
         return frame.shape[2:]
 
-    minibatch_size = args.zoed_batch_size // 2 or 1 if args.tta else args.zoed_batch_size
+    minibatch_size = args.batch_size // 2 or 1 if args.tta else args.batch_size
 
     def generator():
         rgb_batch = []
@@ -1309,10 +1318,8 @@ def create_parser(required_true=True):
                         help="process all subdirectories")
     parser.add_argument("--resume", action="store_true",
                         help="skip processing when the output file already exists")
-    parser.add_argument("--batch-size", type=int, default=16, choices=[Range(1, 256)],
-                        help="batch size for RowFlow model, 256x256 tiled input. !!DEPRECATED!!")
-    parser.add_argument("--zoed-batch-size", type=int, default=2, choices=[Range(1, 64)],
-                        help="batch size for ZoeDepth model. ignored when --low-vram")
+    parser.add_argument("--batch-size", type=int, default=2, choices=[Range(1, 64)],
+                        help="batch size. ignored when --low-vram")
     parser.add_argument("--max-fps", type=float, default=30,
                         help="max framerate for video. output fps = min(fps, --max-fps)")
     parser.add_argument("--profile-level", type=str, help="h264 profile level")
@@ -1329,7 +1336,7 @@ def create_parser(required_true=True):
     parser.add_argument("--yes", "-y", action="store_true", default=False,
                         help="overwrite output files")
     parser.add_argument("--pad", type=float, help="pad_size = int(size * pad)")
-    parser.add_argument("--depth-model", type=str, default="ZoeD_N",
+    parser.add_argument("--depth-model", type=str, default="ZoeD_Any_N",
                         choices=["ZoeD_N", "ZoeD_K", "ZoeD_NK",
                                  "Any_S", "Any_B", "Any_L",
                                  "ZoeD_Any_N", "ZoeD_Any_K",
@@ -1386,6 +1393,7 @@ def create_parser(required_true=True):
     parser.add_argument("--anaglyph", type=str, nargs="?", default=None, const="dubois",
                         choices=["color", "gray", "half-color", "wimmer", "wimmer2", "dubois", "dubois2"],
                         help="output in anaglyph 3d")
+    parser.add_argument("--cross-eyed", action="store_true", help="output for cross-eyed viewing")
     parser.add_argument("--pix-fmt", type=str, default="yuv420p", choices=["yuv420p", "yuv444p", "rgb24", "gbrp"],
                         help="pixel format (video only)")
     parser.add_argument("--tta", action="store_true",
@@ -1404,7 +1412,7 @@ def create_parser(required_true=True):
                         help="set the start time offset for video. hh:mm:ss or mm:ss format")
     parser.add_argument("--end-time", type=str,
                         help="set the end time offset for video. hh:mm:ss or mm:ss format")
-    parser.add_argument("--zoed-height", type=int,
+    parser.add_argument("--resolution", type=int,
                         help="input resolution(small side) for depth model")
     parser.add_argument("--stereo-width", type=int,
                         help="input width for row_flow_v3/row_flow_v2 model")
@@ -1435,6 +1443,12 @@ def create_parser(required_true=True):
                         choices=["unspecified", "auto",
                                  "bt709", "bt709-pc", "bt709-tv", "bt601", "bt601-pc", "bt601-tv"],
                         help="video colorspace")
+    # Deprecated
+    parser.add_argument("--zoed-batch-size", type=int,
+                        help="Deprecated. Use --batch-size instead")
+    parser.add_argument("--zoed-height", type=int,
+                        help="Deprecated. Use --resolution instead")
+
     return parser
 
 
@@ -1484,6 +1498,14 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
     if not args.profile_level or args.profile_level == "auto":
         args.profile_level = None
 
+    # deprecated options
+    if args.zoed_batch_size is not None:
+        args.batch_size = args.zoed_batch_size
+        warnings.warn("--zoed-batch-size is deprecated. Use --batch-size instead")
+    if args.zoed_height is not None:
+        args.resolution = args.zoed_height
+        warnings.warn("--zoed-height is deprecated. Use --resolution instead")
+
     args.state = {
         "stop_event": stop_event,
         "suspend_event": suspend_event,
@@ -1515,9 +1537,7 @@ def is_yaml(filename):
 
 def iw3_main(args):
     assert not (args.rotate_left and args.rotate_right)
-    assert not (args.half_sbs and args.vr180)
-    assert not (args.half_sbs and args.anaglyph)
-    assert not (args.vr180 and args.anaglyph)
+    assert sum([1 for flag in (args.half_sbs, args.vr180, args.anaglyph, args.tb, args.half_tb, args.cross_eyed) if flag]) < 2
 
     if len(args.gpu) > 1 and len(args.gpu) > args.max_workers:
         # For GPU round-robin on thread pool
@@ -1558,7 +1578,7 @@ def iw3_main(args):
 
     if not is_yaml(args.input):
         if not depth_model.loaded():
-            depth_model.load(gpu=args.gpu, resolution=args.zoed_height)
+            depth_model.load(gpu=args.gpu, resolution=args.resolution)
 
         is_metric = depth_model.is_metric()
         args.mapper = resolve_mapper_name(mapper=args.mapper, foreground_scale=args.foreground_scale,
@@ -1600,10 +1620,12 @@ def iw3_main(args):
         if not args.recursive:
             image_files = ImageLoader.listdir(args.input)
             process_images(image_files, args.output, args, depth_model, side_model, title="Images")
+            gc_collect()
             for video_file in VU.list_videos(args.input):
                 if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
                     return args
                 process_video(video_file, args.output, args, depth_model, side_model)
+                gc_collect()
         else:
             subdirs = list_subdir(args.input, include_root=True, excludes=args.output)
             for input_dir in subdirs:
@@ -1612,10 +1634,12 @@ def iw3_main(args):
                 if image_files:
                     process_images(image_files, output_dir, args, depth_model, side_model,
                                    title=path.relpath(input_dir, args.input))
+                    gc_collect()
                 for video_file in VU.list_videos(input_dir):
                     if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
                         return args
                     process_video(video_file, output_dir, args, depth_model, side_model)
+                    gc_collect()
 
     elif is_yaml(args.input):
         config = export_config.ExportConfig.load(args.input)
@@ -1639,6 +1663,7 @@ def iw3_main(args):
             if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
                 return args
             process_video(video_file, args.output, args, depth_model, side_model)
+            gc_collect()
     elif is_video(args.input):
         process_video(args.input, args.output, args, depth_model, side_model)
     elif is_image(args.input):

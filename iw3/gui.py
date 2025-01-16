@@ -3,7 +3,6 @@ import locale
 import sys
 import os
 from os import path
-import gc
 import traceback
 import functools
 from time import time
@@ -11,20 +10,22 @@ import threading
 import wx
 from wx.lib.delayedresult import startWorker
 import wx.lib.agw.persist as persist
-from wx.lib.buttons import GenBitmapButton
 from .utils import (
     create_parser, set_state_args, iw3_main,
     is_text, is_video, is_output_dir, is_yaml, make_output_filename,
     has_rembg_model)
+from nunif.initializer import gc_collect
 from nunif.device import mps_is_available, xpu_is_available
 from nunif.utils.image_loader import IMG_EXTENSIONS as LOADER_SUPPORTED_EXTENSIONS
 from nunif.utils.video import VIDEO_EXTENSIONS as KNOWN_VIDEO_EXTENSIONS, has_nvenc
-from nunif.utils.gui import (
+from nunif.gui import (
     TQDMGUI, FileDropCallback, EVT_TQDM, TimeCtrl,
     EditableComboBox, EditableComboBoxPersistentHandler,
     persistent_manager_register_all, persistent_manager_restore_all, persistent_manager_register,
-    resolve_default_dir, extension_list_to_wildcard, validate_number,
-    set_icon_ex, start_file, load_icon)
+    extension_list_to_wildcard, validate_number,
+    set_icon_ex,
+    VideoEncodingBox, IOPathPanel
+)
 from .locales import LOCALES
 from . import models # noqa
 from .depth_anything_model import DepthAnythingModel
@@ -42,21 +43,6 @@ os.makedirs(path.dirname(CONFIG_PATH), exist_ok=True)
 
 
 LAYOUT_DEBUG = False
-
-
-LEVEL_LIBX264 = ["3.0", "3.1", "3.2", "4.0", "4.1", "4.2", "5.0", "5.1", "5.2", "6.0", "6.2"]
-LEVEL_LIBX265 = ["3.0", "3.1", "4.0", "4.1", "5.0", "5.1", "5.2", "6.0", "6.1", "6.2", "8.5"]
-LEVEL_ALL = ["auto"] + sorted(list(set(LEVEL_LIBX264) | set(LEVEL_LIBX265)), key=lambda v: float(v))
-
-TUNE_LIBX264 = ["film", "animation", "grain", "stillimage", "psnr"]
-TUNE_LIBX265 = ["grain", "animation", "psnr", "fastdecode", "zerolatency"]
-TUNE_NVENC = ["uhq", "hq", "ll", "ull"]
-TUNE_ALL = [""] + sorted(list(set(TUNE_LIBX264) | set(TUNE_LIBX265)))
-
-PRESET_LIBX264 = ["ultrafast", "superfast", "veryfast", "faster", "fast",
-                  "medium", "slow", "slower", "veryslow", "placebo"]
-PRESET_NVENC = ["fast", "medium", "slow", "p1", "p2", "p3", "p4", "p5", "p6", "p7"]
-PRESET_ALL = PRESET_LIBX264
 
 
 class IW3App(wx.App):
@@ -104,78 +90,54 @@ class MainFrame(wx.Frame):
         self.CreateStatusBar()
 
         # input output panel
+        input_wildcard = (f"Image and Video and YAML files|{IMAGE_EXTENSIONS};{VIDEO_EXTENSIONS};{YAML_EXTENSIONS}"
+                          f"|Video files|{VIDEO_EXTENSIONS}"
+                          f"|Image files|{IMAGE_EXTENSIONS}"
+                          f"|YAML files|{YAML_EXTENSIONS}"
+                          "|All Files|*.*")
+        self.pnl_file = IOPathPanel(
+            self,
+            input_wildcard=input_wildcard,
+            default_output_dir_name="iw3",
+            resolve_output_path=self.resolve_output_path,
+            translate_function=T,
+        )
 
-        self.pnl_file = wx.Panel(self)
-        if LAYOUT_DEBUG:
-            self.pnl_file.SetBackgroundColour("#ccf")
-
-        self.lbl_input = wx.StaticText(self.pnl_file, label=T("Input"))
-        self.txt_input = wx.TextCtrl(self.pnl_file, name="txt_input")
-        self.btn_input_file = GenBitmapButton(self.pnl_file, bitmap=load_icon("image-open.png"))
-        self.btn_input_file.SetToolTip(T("Choose a file"))
-        self.btn_input_dir = GenBitmapButton(self.pnl_file, bitmap=load_icon("folder-open.png"))
-        self.btn_input_dir.SetToolTip(T("Choose a directory"))
-        self.btn_input_play = GenBitmapButton(self.pnl_file, bitmap=load_icon("media-playback-start.png"))
-        self.btn_input_play.SetToolTip(T("Play"))
-
-        self.lbl_output = wx.StaticText(self.pnl_file, label=T("Output"))
-        self.txt_output = wx.TextCtrl(self.pnl_file, name="txt_output")
-        self.btn_same_output_dir = GenBitmapButton(self.pnl_file, bitmap=load_icon("emblem-symbolic-link.png"))
-        self.btn_same_output_dir.SetToolTip(T("Set the same directory"))
-        self.btn_output_dir = GenBitmapButton(self.pnl_file, bitmap=load_icon("folder-open.png"))
-        self.btn_output_dir.SetToolTip(T("Choose a directory"))
-        self.btn_output_play = GenBitmapButton(self.pnl_file, bitmap=load_icon("media-playback-start.png"))
-        self.btn_output_play.SetToolTip(T("Play"))
-
-        self.chk_resume = wx.CheckBox(self.pnl_file, label=T("Resume"), name="chk_resume")
+        self.pnl_file_option = wx.Panel(self)
+        self.chk_resume = wx.CheckBox(self.pnl_file_option, label=T("Resume"), name="chk_resume")
         self.chk_resume.SetToolTip(T("Skip processing when the output file already exists"))
         self.chk_resume.SetValue(True)
 
-        self.chk_recursive = wx.CheckBox(self.pnl_file, label=T("Process all subfolders"),
+        self.chk_recursive = wx.CheckBox(self.pnl_file_option, label=T("Process all subfolders"),
                                          name="chk_recursive")
         self.chk_recursive.SetValue(False)
 
-        self.chk_exif_transpose = wx.CheckBox(self.pnl_file, label=T("EXIF Transpose"),
+        self.chk_exif_transpose = wx.CheckBox(self.pnl_file_option, label=T("EXIF Transpose"),
                                               name="chk_exif_transpose")
         self.chk_exif_transpose.SetValue(True)
         self.chk_exif_transpose.SetToolTip(T("Transpose images according to EXIF Orientaion Tag"))
 
-        self.chk_metadata = wx.CheckBox(self.pnl_file, label=T("Add metadata to filename"),
+        self.chk_metadata = wx.CheckBox(self.pnl_file_option, label=T("Add metadata to filename"),
                                         name="chk_metadata")
         self.chk_metadata.SetValue(False)
 
-        self.sep_image_format = wx.StaticLine(self.pnl_file, size=(2, 16), style=wx.LI_VERTICAL)
-        self.lbl_image_format = wx.StaticText(self.pnl_file, label=" " + T("Image Format"))
-        self.cbo_image_format = wx.ComboBox(self.pnl_file, choices=["png", "jpeg", "webp"],
+        self.sep_image_format = wx.StaticLine(self.pnl_file_option, size=(2, 16), style=wx.LI_VERTICAL)
+        self.lbl_image_format = wx.StaticText(self.pnl_file_option, label=" " + T("Image Format"))
+        self.cbo_image_format = wx.ComboBox(self.pnl_file_option, choices=["png", "jpeg", "webp"],
                                             style=wx.CB_READONLY, name="cbo_image_format")
         self.cbo_image_format.SetSelection(0)
         self.cbo_image_format.SetToolTip(T("Output Image Format"))
 
-        sublayout = wx.BoxSizer(wx.HORIZONTAL)
-        sublayout.Add(self.chk_resume, flag=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
-        sublayout.Add(self.chk_recursive, flag=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
-        sublayout.Add(self.chk_exif_transpose, flag=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
-        sublayout.Add(self.chk_metadata, flag=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
-        sublayout.Add(self.sep_image_format, flag=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
-        sublayout.Add(self.lbl_image_format, flag=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
-        sublayout.Add(self.cbo_image_format, flag=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
-
-        layout = wx.GridBagSizer(vgap=4, hgap=4)
-        layout.Add(self.lbl_input, (0, 0), flag=wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_input, (0, 1), flag=wx.ALIGN_CENTER_VERTICAL | wx.EXPAND)
-        layout.Add(self.btn_input_file, (0, 2), flag=wx.ALIGN_CENTER | wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.btn_input_dir, (0, 3), flag=wx.ALIGN_CENTER | wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.btn_input_play, (0, 4), flag=wx.ALIGN_CENTER | wx.ALIGN_CENTER_VERTICAL)
-
-        layout.Add(self.lbl_output, (1, 0), flag=wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_output, (1, 1), flag=wx.ALIGN_CENTER_VERTICAL | wx.EXPAND)
-        layout.Add(self.btn_same_output_dir, (1, 2), flag=wx.ALIGN_CENTER | wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.btn_output_dir, (1, 3), flag=wx.ALIGN_CENTER | wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.btn_output_play, (1, 4), flag=wx.ALIGN_CENTER | wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(sublayout, (2, 1), flag=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
-
-        layout.AddGrowableCol(1)
-        self.pnl_file.SetSizer(layout)
+        layout = wx.BoxSizer(wx.HORIZONTAL)
+        layout.AddSpacer(4)
+        layout.Add(self.chk_resume, flag=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_recursive, flag=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_exif_transpose, flag=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_metadata, flag=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.sep_image_format, flag=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_image_format, flag=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_image_format, flag=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
+        self.pnl_file_option.SetSizer(layout)
 
         # options panel
 
@@ -240,13 +202,13 @@ class MainFrame(wx.Frame):
         self.cbo_depth_model = wx.ComboBox(self.grp_stereo,
                                            choices=depth_models,
                                            style=wx.CB_READONLY, name="cbo_depth_model")
-        self.cbo_depth_model.SetSelection(0)
+        self.cbo_depth_model.SetSelection(3)
 
-        self.lbl_zoed_resolution = wx.StaticText(self.grp_stereo, label=T("Depth") + " " + T("Resolution"))
-        self.cbo_zoed_resolution = EditableComboBox(self.grp_stereo,
-                                                    choices=["Default", "512"],
-                                                    name="cbo_zoed_resolution")
-        self.cbo_zoed_resolution.SetSelection(0)
+        self.lbl_resolution = wx.StaticText(self.grp_stereo, label=T("Depth") + " " + T("Resolution"))
+        self.cbo_resolution = EditableComboBox(self.grp_stereo,
+                                               choices=["Default", "512"],
+                                               name="cbo_zoed_resolution")
+        self.cbo_resolution.SetSelection(0)
 
         self.lbl_foreground_scale = wx.StaticText(self.grp_stereo, label=T("Foreground Scale"))
         self.cbo_foreground_scale = EditableComboBox(self.grp_stereo,
@@ -269,16 +231,25 @@ class MainFrame(wx.Frame):
             choices=["Full SBS", "Half SBS",
                      "Full TB", "Half TB",
                      "VR90",
+                     "Cross Eyed",
+                     "Anaglyph",
                      "Export", "Export disparity",
-                     "Anaglyph dubois",
-                     "Anaglyph dubois2",
-                     "Anaglyph color", "Anaglyph gray",
-                     "Anaglyph half-color",
-                     "Anaglyph wimmer", "Anaglyph wimmer2",
                      "Debug Depth",
                      ],
             style=wx.CB_READONLY, name="cbo_stereo_format")
         self.cbo_stereo_format.SetSelection(0)
+
+        self.lbl_anaglyph_method = wx.StaticText(self.grp_stereo, label=T("Anaglyph Method"))
+        self.cbo_anaglyph_method = wx.ComboBox(
+            self.grp_stereo,
+            choices=["dubois", "dubois2",
+                     "color", "gray",
+                     "half-color",
+                     "wimmer", "wimmer2"],
+            style=wx.CB_READONLY, name="cbo_anaglyph_method")
+        self.cbo_anaglyph_method.SetSelection(0)
+        self.lbl_anaglyph_method.Hide()
+        self.cbo_anaglyph_method.Hide()
 
         self.chk_ema_normalize = wx.CheckBox(self.grp_stereo,
                                              label=T("Flicker Reduction"),
@@ -290,7 +261,7 @@ class MainFrame(wx.Frame):
 
         self.chk_ema_normalize.SetToolTip(T("Video Only") + " " + T("(experimental)"))
 
-        layout = wx.FlexGridSizer(rows=11, cols=2, vgap=4, hgap=4)
+        layout = wx.FlexGridSizer(rows=12, cols=2, vgap=4, hgap=4)
         layout.Add(self.lbl_divergence, 0, wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_divergence, 1, wx.EXPAND)
         layout.Add(self.lbl_convergence, 0, wx.ALIGN_CENTER_VERTICAL)
@@ -303,8 +274,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_stereo_width, 1, wx.EXPAND)
         layout.Add(self.lbl_depth_model, 0, wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_depth_model, 1, wx.EXPAND)
-        layout.Add(self.lbl_zoed_resolution, 0, wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_zoed_resolution, 1, wx.EXPAND)
+        layout.Add(self.lbl_resolution, 0, wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_resolution, 1, wx.EXPAND)
         layout.Add(self.lbl_foreground_scale, 0, wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_foreground_scale, 1, wx.EXPAND)
         layout.Add(self.chk_edge_dilation, 0, wx.ALIGN_CENTER_VERTICAL)
@@ -313,6 +284,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_ema_decay, 1, wx.EXPAND)
         layout.Add(self.lbl_stereo_format, 0, wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_stereo_format, 1, wx.EXPAND)
+        layout.Add(self.lbl_anaglyph_method, 0, wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_anaglyph_method, 1, wx.EXPAND)
 
         sizer_stereo = wx.StaticBoxSizer(self.grp_stereo, wx.VERTICAL)
         sizer_stereo.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
@@ -320,89 +293,7 @@ class MainFrame(wx.Frame):
         # video encoding
         # sbs/vr180, padding
         # max-fps, crf, preset, tune
-        self.grp_video = wx.StaticBox(self.pnl_options, label=T("Video Encoding"))
-
-        self.lbl_video_format = wx.StaticText(self.grp_video, label=T("Video Format"))
-        self.cbo_video_format = wx.ComboBox(self.grp_video, choices=["mp4", "mkv", "avi"],
-                                            style=wx.CB_READONLY, name="cbo_video_format")
-        self.cbo_video_format.SetSelection(0)
-
-        self.lbl_video_codec = wx.StaticText(self.grp_video, label=T("Video Codec"))
-        self.cbo_video_codec = EditableComboBox(
-            self.grp_video, choices=["libx264", "libx265", "h264_nvenc", "hevc_nvenc", "utvideo"],
-            name="cbo_video_codec")
-        self.cbo_video_codec.SetSelection(0)
-
-        self.lbl_fps = wx.StaticText(self.grp_video, label=T("Max FPS"))
-        self.cbo_fps = EditableComboBox(
-            self.grp_video, choices=["1000", "60", "59.94", "30", "29.97", "24", "23.976", "15", "1", "0.25"],
-            name="cbo_fps")
-        self.cbo_fps.SetSelection(3)
-
-        self.lbl_pix_fmt = wx.StaticText(self.grp_video, label=T("Pixel Format"))
-        self.cbo_pix_fmt = wx.ComboBox(self.grp_video, choices=["yuv420p", "yuv444p", "rgb24", "p016le"],
-                                       style=wx.CB_READONLY, name="cbo_pix_fmt")
-        self.cbo_pix_fmt.SetSelection(0)
-
-        self.lbl_colorspace = wx.StaticText(self.grp_video, label=T("Colorspace"))
-        self.cbo_colorspace = wx.ComboBox(
-            self.grp_video,
-            choices=["auto", "unspecified", "bt709", "bt709-pc", "bt709-tv", "bt601", "bt601-pc", "bt601-tv"],
-            style=wx.CB_READONLY, name="cbo_colorspace")
-        self.cbo_colorspace.SetSelection(1)
-
-        self.lbl_crf = wx.StaticText(self.grp_video, label=T("CRF"))
-        self.cbo_crf = EditableComboBox(self.grp_video, choices=[str(n) for n in range(16, 28)],
-                                        name="cbo_crf")
-        self.cbo_crf.SetSelection(4)
-
-        self.lbl_profile_level = wx.StaticText(self.grp_video, label=T("Level"))
-        self.cbo_profile_level = EditableComboBox(self.grp_video, choices=LEVEL_ALL, name="cbo_profile_level")
-        self.cbo_profile_level.SetSelection(0)
-
-        self.lbl_preset = wx.StaticText(self.grp_video, label=T("Preset"))
-        self.cbo_preset = wx.ComboBox(
-            self.grp_video, choices=PRESET_ALL,
-            style=wx.CB_READONLY, name="cbo_preset")
-        self.cbo_preset.SetSelection(0)
-
-        self.lbl_tune = wx.StaticText(self.grp_video, label=T("Tune"))
-        self.cbo_tune = wx.ComboBox(
-            self.grp_video, choices=TUNE_ALL,
-            style=wx.CB_READONLY, name="cbo_tune")
-        self.cbo_tune.SetSelection(0)
-        self.chk_tune_fastdecode = wx.CheckBox(self.grp_video, label=T("fastdecode"),
-                                               name="chk_tune_fastdecode")
-        self.chk_tune_fastdecode.SetValue(False)
-        self.chk_tune_zerolatency = wx.CheckBox(self.grp_video, label=T("zerolatency"),
-                                                name="chk_tune_zerolatency")
-        self.chk_tune_zerolatency.SetValue(False)
-
-        layout = wx.GridBagSizer(vgap=4, hgap=4)
-        layout.Add(self.lbl_fps, (0, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_fps, (0, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_video_format, (1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_video_format, (1, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_video_codec, (2, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_video_codec, (2, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_pix_fmt, (3, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_pix_fmt, (3, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_colorspace, (4, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_colorspace, (4, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_crf, (5, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_crf, (5, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_profile_level, (6, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_profile_level, (6, 1), flag=wx.EXPAND)
-
-        layout.Add(self.lbl_preset, (7, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_preset, (7, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_tune, (8, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_tune, (8, 1), flag=wx.EXPAND)
-        layout.Add(self.chk_tune_fastdecode, (9, 1), flag=wx.EXPAND)
-        layout.Add(self.chk_tune_zerolatency, (10, 1), flag=wx.EXPAND)
-
-        sizer_video = wx.StaticBoxSizer(self.grp_video, wx.VERTICAL)
-        sizer_video.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
+        self.grp_video = VideoEncodingBox(self.pnl_options, translate_function=T, has_nvenc=has_nvenc())
 
         # background removal
         self.grp_rembg = wx.StaticBox(self.pnl_options, label=T("Background Removal"))
@@ -508,12 +399,12 @@ class MainFrame(wx.Frame):
         self.cbo_device.Append("CPU", -1)
         self.cbo_device.SetSelection(0)
 
-        self.lbl_zoed_batch_size = wx.StaticText(self.grp_processor, label=T("Depth") + " " + T("Batch Size"))
-        self.cbo_zoed_batch_size = wx.ComboBox(self.grp_processor,
-                                               choices=[str(n) for n in (64, 32, 16, 8, 4, 2, 1)],
-                                               style=wx.CB_READONLY, name="cbo_zoed_batch_size")
-        self.cbo_zoed_batch_size.SetToolTip(T("Video Only"))
-        self.cbo_zoed_batch_size.SetSelection(5)
+        self.lbl_batch_size = wx.StaticText(self.grp_processor, label=T("Depth") + " " + T("Batch Size"))
+        self.cbo_batch_size = wx.ComboBox(self.grp_processor,
+                                          choices=[str(n) for n in (64, 32, 16, 8, 4, 2, 1)],
+                                          style=wx.CB_READONLY, name="cbo_zoed_batch_size")
+        self.cbo_batch_size.SetToolTip(T("Video Only"))
+        self.cbo_batch_size.SetSelection(5)
 
         self.lbl_max_workers = wx.StaticText(self.grp_processor, label=T("Worker Threads"))
         self.cbo_max_workers = wx.ComboBox(self.grp_processor,
@@ -535,8 +426,8 @@ class MainFrame(wx.Frame):
         layout = wx.GridBagSizer(vgap=5, hgap=4)
         layout.Add(self.lbl_device, (0, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_device, (0, 1), (0, 3), flag=wx.EXPAND)
-        layout.Add(self.lbl_zoed_batch_size, (1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_zoed_batch_size, (1, 1), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_batch_size, (1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_batch_size, (1, 1), (0, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_max_workers, (2, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_max_workers, (2, 1), (0, 3), flag=wx.EXPAND)
         layout.Add(self.chk_low_vram, (3, 0), flag=wx.EXPAND)
@@ -549,7 +440,7 @@ class MainFrame(wx.Frame):
 
         layout = wx.GridBagSizer(wx.HORIZONTAL)
         layout.Add(sizer_stereo, (0, 0), (2, 0), flag=wx.ALL | wx.EXPAND, border=4)
-        layout.Add(sizer_video, (0, 1), flag=wx.ALL | wx.EXPAND, border=4)
+        layout.Add(self.grp_video.sizer, (0, 1), flag=wx.ALL | wx.EXPAND, border=4)
         layout.Add(sizer_rembg, (1, 1), flag=wx.ALL | wx.EXPAND, border=4)
         layout.Add(sizer_video_filter, (0, 2), flag=wx.ALL | wx.EXPAND, border=4)
         layout.Add(sizer_processor, (1, 2), flag=wx.ALL | wx.EXPAND, border=4)
@@ -574,29 +465,22 @@ class MainFrame(wx.Frame):
         # main layout
 
         layout = wx.BoxSizer(wx.VERTICAL)
-        layout.Add(self.pnl_file, 0, wx.ALL | wx.EXPAND, 8)
+        layout.AddSpacer(8)
+        layout.Add(self.pnl_file.panel, 0, wx.ALL | wx.EXPAND, 8)
+        layout.Add(self.pnl_file_option, 0, wx.ALL | wx.EXPAND, 4)
         layout.Add(self.pnl_options, 1, wx.ALL | wx.EXPAND, 8)
         layout.Add(self.pnl_process, 0, wx.ALL | wx.EXPAND, 8)
         self.SetSizer(layout)
 
         # bind
-        self.btn_input_file.Bind(wx.EVT_BUTTON, self.on_click_btn_input_file)
-        self.btn_input_dir.Bind(wx.EVT_BUTTON, self.on_click_btn_input_dir)
-        self.btn_input_play.Bind(wx.EVT_BUTTON, self.on_click_btn_input_play)
-        self.btn_output_dir.Bind(wx.EVT_BUTTON, self.on_click_btn_output_dir)
-        self.btn_same_output_dir.Bind(wx.EVT_BUTTON, self.on_click_btn_same_output_dir)
-        self.btn_output_play.Bind(wx.EVT_BUTTON, self.on_click_btn_output_play)
-
-        self.txt_input.Bind(wx.EVT_TEXT, self.on_text_changed_txt_input)
-        self.txt_output.Bind(wx.EVT_TEXT, self.on_text_changed_txt_output)
+        self.pnl_file.bind_input_path_changed(self.on_text_changed_txt_input)
+        self.pnl_file.bind_output_path_changed(self.on_text_changed_txt_output)
 
         self.cbo_depth_model.Bind(wx.EVT_TEXT, self.on_selected_index_changed_cbo_depth_model)
         self.chk_edge_dilation.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_edge_dilation)
         self.chk_ema_normalize.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_ema_normalize)
 
         self.cbo_stereo_format.Bind(wx.EVT_TEXT, self.on_selected_index_changed_cbo_stereo_format)
-        self.cbo_video_format.Bind(wx.EVT_TEXT, self.on_selected_index_changed_cbo_video_format)
-        self.cbo_video_codec.Bind(wx.EVT_TEXT, self.on_selected_index_changed_cbo_video_codec)
 
         self.btn_start.Bind(wx.EVT_BUTTON, self.on_click_btn_start)
         self.btn_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_cancel)
@@ -605,53 +489,51 @@ class MainFrame(wx.Frame):
         self.Bind(EVT_TQDM, self.on_tqdm)
         self.Bind(wx.EVT_CLOSE, self.on_close)
 
+        editable_comboboxes = [
+            self.cbo_divergence,
+            self.cbo_convergence,
+            self.cbo_resolution,
+            self.cbo_stereo_width,
+            self.cbo_edge_dilation,
+            self.cbo_ema_decay,
+            *self.grp_video.get_editable_comboboxes(),
+            self.cbo_foreground_scale,
+        ]
+
         self.SetDropTarget(FileDropCallback(self.on_drop_files))
         # Disable default drop target
-        for control in (self.txt_input, self.txt_output, self.txt_vf,
-                        self.cbo_divergence, self.cbo_convergence, self.cbo_pad):
+        for control in (self.pnl_file.input_path_widget, self.pnl_file.output_path_widget, self.txt_vf,
+                        self.cbo_pad, self.txt_start_time, self.txt_end_time, *editable_comboboxes):
             control.SetDropTarget(FileDropCallback(self.on_drop_files))
 
         # Fix Frame and Panel background colors are different in windows
-        self.SetBackgroundColour(self.pnl_file.GetBackgroundColour())
+        self.SetBackgroundColour(self.pnl_file_option.GetBackgroundColour())
 
         # state
         self.btn_cancel.Disable()
         self.btn_suspend.Disable()
 
-        editable_comboxes = [
-            self.cbo_divergence,
-            self.cbo_convergence,
-            self.cbo_zoed_resolution,
-            self.cbo_stereo_width,
-            self.cbo_edge_dilation,
-            self.cbo_ema_decay,
-            self.cbo_fps,
-            self.cbo_crf,
-            self.cbo_profile_level,
-            self.cbo_video_codec,
-            self.cbo_foreground_scale,
-        ]
         self.persistence_manager = persist.PersistenceManager.Get()
         self.persistence_manager.SetManagerStyle(persist.PM_DEFAULT_STYLE)
         self.persistence_manager.SetPersistenceFile(CONFIG_PATH)
         persistent_manager_register_all(self.persistence_manager, self)
-        for control in editable_comboxes:
+        for control in editable_comboboxes:
             persistent_manager_register(self.persistence_manager, control, EditableComboBoxPersistentHandler)
         persistent_manager_restore_all(self.persistence_manager)
 
         self.update_start_button_state()
         self.update_rembg_state()
         self.update_input_option_state()
+        self.update_anaglyph_state()
         if not self.chk_edge_dilation.IsChecked():
             self.update_model_selection()
         self.update_edge_dilation()
         self.update_ema_normalize()
-        self.update_video_format()
-        self.update_video_codec()
+        self.grp_video.update_controls()
 
     def get_anaglyph_method(self):
-        if "Anaglyph" in self.cbo_stereo_format.GetValue():
-            anaglyph = self.cbo_stereo_format.GetValue().split(" ")[-1]
+        if self.cbo_stereo_format.GetValue() == "Anaglyph":
+            anaglyph = self.cbo_anaglyph_method.GetValue()
         else:
             anaglyph = None
         return anaglyph
@@ -662,20 +544,18 @@ class MainFrame(wx.Frame):
 
     def on_drop_files(self, x, y, filenames):
         if filenames:
-            self.txt_input.SetValue(filenames[0])
-            if not self.txt_output.GetValue():
-                self.set_same_output_dir()
+            self.pnl_file.set_input_path(filenames[0])
         return True
 
     def update_start_button_state(self):
         if not self.processing:
-            if self.txt_input.GetValue() and self.txt_output.GetValue():
+            if self.pnl_file.input_path and self.pnl_file.output_path:
                 self.btn_start.Enable()
             else:
                 self.btn_start.Disable()
 
     def update_rembg_state(self):
-        if is_video(self.txt_input.GetValue()):
+        if is_video(self.pnl_file.input_path):
             self.chk_rembg.SetValue(False)
             self.chk_rembg.Disable()
             self.cbo_bg_model.Disable()
@@ -684,7 +564,7 @@ class MainFrame(wx.Frame):
             self.cbo_bg_model.Enable()
 
     def update_input_option_state(self):
-        input_path = self.txt_input.GetValue()
+        input_path = self.pnl_file.input_path
         is_export = self.cbo_stereo_format.GetValue() in {"Export", "Export disparity"}
         if is_export:
             self.chk_resume.Enable()
@@ -716,51 +596,9 @@ class MainFrame(wx.Frame):
         self.txt_start_time.SetValue("00:00:00")
         self.txt_end_time.SetValue("00:00:00")
 
-    def set_same_output_dir(self):
-        selected_path = self.txt_input.GetValue()
-        if path.isdir(selected_path):
-            self.txt_output.SetValue(path.join(selected_path, "iw3"))
-        else:
-            self.txt_output.SetValue(path.join(path.dirname(selected_path), "iw3"))
-
-    def on_click_btn_input_file(self, event):
-        wildcard = (f"Image and Video and YAML files|{IMAGE_EXTENSIONS};{VIDEO_EXTENSIONS};{YAML_EXTENSIONS}"
-                    f"|Video files|{VIDEO_EXTENSIONS}"
-                    f"|Image files|{IMAGE_EXTENSIONS}"
-                    f"|YAML files|{YAML_EXTENSIONS}"
-                    "|All Files|*.*")
-        default_dir = resolve_default_dir(self.txt_input.GetValue())
-        with wx.FileDialog(self.pnl_file, T("Choose a file"),
-                           wildcard=wildcard, defaultDir=default_dir,
-                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg_file:
-            if dlg_file.ShowModal() == wx.ID_CANCEL:
-                return
-            selected_path = dlg_file.GetPath()
-            self.txt_input.SetValue(selected_path)
-            if not self.txt_output.GetValue():
-                self.set_same_output_dir()
-
-    def on_click_btn_input_dir(self, event):
-        default_dir = resolve_default_dir(self.txt_input.GetValue())
-        with wx.DirDialog(self.pnl_file, T("Choose a directory"),
-                          defaultPath=default_dir,
-                          style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST) as dlg_dir:
-            if dlg_dir.ShowModal() == wx.ID_CANCEL:
-                return
-            selected_path = dlg_dir.GetPath()
-            self.txt_input.SetValue(selected_path)
-            if not self.txt_output.GetValue():
-                self.set_same_output_dir()
-
-    def on_click_btn_input_play(self, event):
-        start_file(self.txt_input.GetValue())
-
-    def on_click_btn_output_play(self, event):
-        input_path = self.txt_input.GetValue()
-        output_path = self.txt_output.GetValue()
+    def resolve_output_path(self, input_path, output_path):
         args = self.parse_args()
         video = is_video(input_path)
-
         if args.export:
             if is_video(input_path):
                 basename = (path.splitext(path.basename(input_path))[0]).strip()
@@ -770,24 +608,7 @@ class MainFrame(wx.Frame):
                 output_path,
                 make_output_filename(input_path, args, video=video))
 
-        if path.exists(output_path):
-            start_file(output_path)
-        elif path.exists(path.dirname(output_path)):
-            start_file(path.dirname(output_path))
-
-    def on_click_btn_same_output_dir(self, event):
-        self.set_same_output_dir()
-
-    def on_click_btn_output_dir(self, event):
-        default_dir = resolve_default_dir(self.txt_output.GetValue())
-        if not path.exists(default_dir):
-            default_dir = path.dirname(default_dir)
-        with wx.DirDialog(self.pnl_file, T("Choose a directory"),
-                          defaultPath=default_dir,
-                          style=wx.DD_DEFAULT_STYLE) as dlg_dir:
-            if dlg_dir.ShowModal() == wx.ID_CANCEL:
-                return
-            self.txt_output.SetValue(dlg_dir.GetPath())
+        return output_path
 
     def on_text_changed_txt_input(self, event):
         self.update_start_button_state()
@@ -807,145 +628,27 @@ class MainFrame(wx.Frame):
             self.chk_edge_dilation.SetValue(False)
             self.cbo_edge_dilation.Disable()
         if name in DEPTH_PRO_MODELS:
-            self.cbo_zoed_resolution.Disable()
+            self.cbo_resolution.Disable()
             self.chk_fp16.Disable()
         else:
-            self.cbo_zoed_resolution.Enable()
+            self.cbo_resolution.Enable()
             self.chk_fp16.Enable()
 
-    def update_video_format(self):
-        name = self.cbo_video_format.GetValue()
-        if name == "avi":
-            self.cbo_profile_level.Disable()
-            self.cbo_crf.Disable()
-            self.cbo_preset.Disable()
-            self.cbo_tune.Disable()
-            self.chk_tune_fastdecode.Disable()
-            self.chk_tune_zerolatency.Disable()
+    def update_anaglyph_state(self):
+        if self.cbo_stereo_format.GetValue() == "Anaglyph":
+            self.lbl_anaglyph_method.Show()
+            self.cbo_anaglyph_method.Show()
         else:
-            self.cbo_profile_level.Enable()
-            self.cbo_crf.Enable()
-            self.cbo_preset.Enable()
-            self.cbo_tune.Enable()
-            self.chk_tune_fastdecode.Enable()
-            self.chk_tune_zerolatency.Enable()
-
-        # codec
-        if name == "avi":
-            choices = ["utvideo"]
-        else:
-            choices = ["libx264", "libx265"]
-            if has_nvenc():
-                choices += ["h264_nvenc", "hevc_nvenc"]
-
-        user_codec = self.cbo_video_codec.GetValue()
-        if user_codec not in {"libx265", "libx264", "h264_nvenc", "hevc_nvenc", "utvideo"}:
-            choices.append(user_codec)
-        self.cbo_video_codec.SetItems(choices)
-        if user_codec in choices:
-            self.cbo_video_codec.SetSelection(choices.index(user_codec))
-        else:
-            self.cbo_video_codec.SetSelection(0)
-        self.update_video_codec()
-
-    def update_video_codec(self):
-        container_format = self.cbo_video_format.GetValue()
-        codec = self.cbo_video_codec.GetValue()
-
-        # level
-        user_level = self.cbo_profile_level.GetValue()
-        if codec in {"libx264", "h264_nvenc"}:
-            choices = ["auto"] + LEVEL_LIBX264
-        elif codec in {"libx265", "hevc_nvenc"}:
-            choices = ["auto"] + LEVEL_LIBX265
-        else:
-            choices = LEVEL_ALL
-
-        self.cbo_profile_level.SetItems(choices)
-        if user_level in choices:
-            self.cbo_profile_level.SetSelection(choices.index(user_level))
-        else:
-            self.cbo_profile_level.SetSelection(0)
-
-        # preset
-        if container_format in {"mp4", "mkv"}:
-            preset = self.cbo_preset.GetValue()
-            if codec in {"libx265", "libx264"}:
-                # preset
-                choices = PRESET_LIBX264
-                default_preset = "ultrafast"
-            elif codec in {"h264_nvenc", "hevc_nvenc"}:
-                choices = PRESET_NVENC
-                default_preset = "medium"
-            else:
-                choices = PRESET_ALL
-                default_preset = "ultrafast"
-
-            self.cbo_preset.SetItems(choices)
-            if preset in choices:
-                self.cbo_preset.SetSelection(choices.index(preset))
-            else:
-                self.cbo_preset.SetSelection(choices.index(default_preset))
-        # tune
-        if container_format in {"mp4", "mkv"}:
-            if codec == "libx265":
-                # tune
-                tune = []
-                if self.chk_tune_zerolatency.IsChecked():
-                    tune.append("zerolatency")
-                if self.chk_tune_fastdecode.IsChecked():
-                    tune.append("fastdecode")
-                tune.append(self.cbo_tune.GetValue())
-
-                choices = [""] + TUNE_LIBX265
-                self.cbo_tune.SetItems(choices)
-                if tune[0] in choices:
-                    self.cbo_tune.SetSelection(choices.index(tune[0]))
-                else:
-                    self.cbo_tune.SetSelection(0)
-
-                self.chk_tune_fastdecode.SetValue(False)
-                self.chk_tune_fastdecode.Disable()
-                self.chk_tune_zerolatency.SetValue(False)
-                self.chk_tune_zerolatency.Disable()
-
-            elif codec == "libx264":
-                tune = []
-                tune.append(self.cbo_tune.GetValue())
-                if self.chk_tune_zerolatency.IsChecked():
-                    tune.append("zerolatency")
-                if self.chk_tune_fastdecode.IsChecked():
-                    tune.append("fastdecode")
-
-                choices = [""] + TUNE_LIBX264
-                self.cbo_tune.SetItems(choices)
-                if tune[0] in choices:
-                    self.cbo_tune.SetSelection(choices.index(tune[0]))
-                else:
-                    self.cbo_tune.SetSelection(0)
-
-                self.chk_tune_fastdecode.Enable()
-                self.chk_tune_fastdecode.SetValue("fastdecode" in tune)
-                self.chk_tune_zerolatency.Enable()
-                self.chk_tune_zerolatency.SetValue("zerolatency" in tune)
-            elif codec in {"h264_nvenc", "hevc_nvenc"}:
-                tune = self.cbo_tune.GetValue()
-                choices = [""] + TUNE_NVENC
-                self.cbo_tune.SetItems(choices)
-                if tune in choices:
-                    self.cbo_tune.SetSelection(choices.index(tune))
-                else:
-                    self.cbo_tune.SetSelection(0)
-                self.chk_tune_fastdecode.SetValue(False)
-                self.chk_tune_fastdecode.Disable()
-                self.chk_tune_zerolatency.SetValue(False)
-                self.chk_tune_zerolatency.Disable()
+            self.lbl_anaglyph_method.Hide()
+            self.cbo_anaglyph_method.Hide()
+        self.GetSizer().Layout()
 
     def on_selected_index_changed_cbo_depth_model(self, event):
         self.update_model_selection()
 
     def on_selected_index_changed_cbo_stereo_format(self, event):
         self.update_input_option_state()
+        self.update_anaglyph_state()
 
     def on_selected_index_changed_cbo_video_format(self, event):
         self.update_video_format()
@@ -1020,10 +723,10 @@ class MainFrame(wx.Frame):
         if not validate_number(self.cbo_edge_dilation.GetValue(), 0, 20, is_int=True, allow_empty=False):
             self.show_validation_error_message(T("Edge Fix"), 0, 20)
             return None
-        if not validate_number(self.cbo_fps.GetValue(), 0.25, 1000.0, allow_empty=False):
+        if not validate_number(self.grp_video.max_fps, 0.25, 1000.0, allow_empty=False):
             self.show_validation_error_message(T("Max FPS"), 0.25, 1000.0)
             return None
-        if not validate_number(self.cbo_crf.GetValue(), 0, 51, is_int=True):
+        if not validate_number(self.grp_video.crf, 0, 51, is_int=True):
             self.show_validation_error_message(T("CRF"), 0, 51)
             return None
         if not validate_number(self.cbo_ema_decay.GetValue(), 0.1, 0.999):
@@ -1033,14 +736,14 @@ class MainFrame(wx.Frame):
             self.show_validation_error_message(T("Foreground Scale"), -3, 3)
             return None
 
-        zoed_height = self.cbo_zoed_resolution.GetValue()
-        if zoed_height == "Default" or zoed_height == "":
-            zoed_height = None
+        resolution = self.cbo_resolution.GetValue()
+        if resolution == "Default" or resolution == "":
+            resolution = None
         else:
-            if not validate_number(zoed_height, 384, 8190, is_int=True, allow_empty=False):
+            if not validate_number(resolution, 384, 8190, is_int=True, allow_empty=False):
                 self.show_validation_error_message(T("Depth") + " " + T("Resolution"), 384, 8190)
                 return
-            zoed_height = int(zoed_height)
+            resolution = int(resolution)
 
         stereo_width = self.cbo_stereo_width.GetValue()
         if stereo_width == "Default" or stereo_width == "":
@@ -1057,21 +760,11 @@ class MainFrame(wx.Frame):
         half_sbs = self.cbo_stereo_format.GetValue() == "Half SBS"
         tb = self.cbo_stereo_format.GetValue() == "Full TB"
         half_tb = self.cbo_stereo_format.GetValue() == "Half TB"
+        cross_eyed = self.cbo_stereo_format.GetValue() == "Cross Eyed"
         anaglyph = self.get_anaglyph_method()
         export = self.cbo_stereo_format.GetValue() == "Export"
         export_disparity = self.cbo_stereo_format.GetValue() == "Export disparity"
         debug_depth = self.cbo_stereo_format.GetValue() == "Debug Depth"
-
-        tune = set()
-        if self.chk_tune_zerolatency.GetValue():
-            tune.add("zerolatency")
-        if self.chk_tune_fastdecode.GetValue():
-            tune.add("fastdecode")
-        if self.cbo_tune.GetValue():
-            tune.add(self.cbo_tune.GetValue())
-        profile_level = self.cbo_profile_level.GetValue()
-        if not profile_level or profile_level == "auto":
-            profile_level = None
 
         if self.cbo_pad.GetValue():
             pad = float(self.cbo_pad.GetValue())
@@ -1101,13 +794,11 @@ class MainFrame(wx.Frame):
         depth_model_type = self.cbo_depth_model.GetValue()
         if (self.depth_model is None or (self.depth_model_type != depth_model_type or
                                          self.depth_model_device_id != device_id or
-                                         self.depth_model_height != zoed_height)):
+                                         self.depth_model_height != resolution)):
             self.depth_model = None
             self.depth_model_type = None
             self.depth_model_device_id = None
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            gc_collect()
 
         remove_bg = self.chk_rembg.GetValue()
         bg_model_type = self.cbo_bg_model.GetValue()
@@ -1117,7 +808,7 @@ class MainFrame(wx.Frame):
         if max_output_size:
             max_output_width, max_output_height = [int(s) for s in max_output_size.split("x")]
 
-        input_path = self.txt_input.GetValue()
+        input_path = self.pnl_file.input_path
         resume = self.chk_resume.IsEnabled() and self.chk_resume.GetValue()
         recursive = path.isdir(input_path) and self.chk_recursive.GetValue()
         start_time = self.txt_start_time.GetValue() if self.chk_start_time.GetValue() else None
@@ -1127,7 +818,7 @@ class MainFrame(wx.Frame):
 
         parser.set_defaults(
             input=input_path,
-            output=self.txt_output.GetValue(),
+            output=self.pnl_file.output_path,
             yes=True,  # TODO: remove this
 
             divergence=float(self.cbo_divergence.GetValue()),
@@ -1141,6 +832,7 @@ class MainFrame(wx.Frame):
             half_sbs=half_sbs,
             tb=tb,
             half_tb=half_tb,
+            cross_eyed=cross_eyed,
             anaglyph=anaglyph,
             export=export,
             export_disparity=export_disparity,
@@ -1148,16 +840,17 @@ class MainFrame(wx.Frame):
             ema_normalize=self.chk_ema_normalize.GetValue(),
             ema_decay=float(self.cbo_ema_decay.GetValue()),
 
-            max_fps=float(self.cbo_fps.GetValue()),
-            pix_fmt=self.cbo_pix_fmt.GetValue(),
-            colorspace=self.cbo_colorspace.GetValue(),
-            video_format=self.cbo_video_format.GetValue(),
             format=self.cbo_image_format.GetValue(),
-            video_codec=self.cbo_video_codec.GetValue(),
-            crf=int(self.cbo_crf.GetValue()),
-            profile_level=profile_level,
-            preset=self.cbo_preset.GetValue(),
-            tune=list(tune),
+
+            max_fps=self.grp_video.max_fps,
+            pix_fmt=self.grp_video.pix_fmt,
+            colorspace=self.grp_video.colorspace,
+            video_format=self.grp_video.video_format,
+            video_codec=self.grp_video.video_codec,
+            crf=self.grp_video.crf,
+            profile_level=self.grp_video.profile_level,
+            preset=self.grp_video.preset,
+            tune=self.grp_video.tune,
 
             remove_bg=remove_bg,
             bg_model=bg_model_type,
@@ -1172,8 +865,8 @@ class MainFrame(wx.Frame):
             keep_aspect_ratio=self.chk_keep_aspect_ratio.GetValue(),
 
             gpu=device_id,
-            zoed_batch_size=int(self.cbo_zoed_batch_size.GetValue()),
-            zoed_height=zoed_height,
+            batch_size=int(self.cbo_batch_size.GetValue()),
+            resolution=resolution,
             stereo_width=stereo_width,
             max_workers=int(self.cbo_max_workers.GetValue()),
             tta=self.chk_tta.GetValue(),
@@ -1229,7 +922,7 @@ class MainFrame(wx.Frame):
             self.depth_model = args.state["depth_model"]
             self.depth_model_type = args.depth_model
             self.depth_model_device_id = args.gpu
-            self.depth_model_height = args.zoed_height
+            self.depth_model_height = args.resolution
 
             if not self.stop_event.is_set():
                 self.prg_tqdm.SetValue(self.prg_tqdm.GetRange())
@@ -1250,9 +943,7 @@ class MainFrame(wx.Frame):
         self.update_start_button_state()
 
         # free vram
-        gc.collect()
-        if torch.cuda.is_available:
-            torch.cuda.empty_cache()
+        gc_collect()
 
     def on_click_btn_cancel(self, event):
         self.suspend_event.set()
