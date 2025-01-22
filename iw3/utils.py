@@ -308,6 +308,8 @@ def make_video_codec_option(args):
             if args.half_sbs:
                 options["x264-params"] = "frame-packing=3"
         elif args.video_codec in {"hevc_nvenc", "h264_nvenc"}:
+            if args.profile_level:
+                options["level"] = args.profile_level
             options["rc"] = "constqp"
             options["qp"] = str(args.crf)
             if args.pix_fmt == "p016le":

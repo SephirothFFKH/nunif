@@ -8,12 +8,12 @@ LEVEL_ALL = ["auto"] + sorted(list(set(LEVEL_LIBX264) | set(LEVEL_LIBX265)), key
 
 TUNE_LIBX264 = ["film", "animation", "grain", "stillimage", "psnr"]
 TUNE_LIBX265 = ["grain", "animation", "psnr", "fastdecode", "zerolatency"]
-TUNE_NVENC = ["hq", "ll", "ull"]
+TUNE_NVENC = ["uhq", "hq", "ll", "ull"]
 TUNE_ALL = [""] + sorted(list(set(TUNE_LIBX264) | set(TUNE_LIBX265)))
 
 PRESET_LIBX264 = ["ultrafast", "superfast", "veryfast", "faster", "fast",
                   "medium", "slow", "slower", "veryslow", "placebo"]
-PRESET_NVENC = ["fast", "medium", "slow"]
+PRESET_NVENC = ["fast", "medium", "slow", "p1", "p2", "p3", "p4", "p5", "p6", "p7"]
 PRESET_ALL = PRESET_LIBX264
 
 
@@ -47,7 +47,7 @@ class VideoEncodingBox():
         self.cbo_fps.SetSelection(3)
 
         self.lbl_pix_fmt = wx.StaticText(self.grp_video, label=T("Pixel Format"))
-        self.cbo_pix_fmt = wx.ComboBox(self.grp_video, choices=["yuv420p", "yuv444p", "rgb24"],
+        self.cbo_pix_fmt = wx.ComboBox(self.grp_video, choices=["yuv420p", "yuv444p", "rgb24", "p016le"],
                                        style=wx.CB_READONLY, name=f"{prefix}cbo_pix_fmt")
         self.cbo_pix_fmt.SetSelection(0)
 
