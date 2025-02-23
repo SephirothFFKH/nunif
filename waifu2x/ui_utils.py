@@ -130,6 +130,9 @@ def process_video(ctx, input_filename, output_path, args):
             elif args.video_codec in {"hevc_nvenc", "h264_nvenc"}:
                 options["rc"] = "constqp"
                 options["qp"] = str(args.crf)
+        elif args.video_codec == "libopenh264":
+            # NOTE: It seems libopenh264 does not support most options.
+            options = {"b": args.video_bitrate}
         else:
             options = {}
 
@@ -259,6 +262,8 @@ def create_parser(required_true=True):
     parser.add_argument("--profile-level", type=str, help="h264 profile level")
     parser.add_argument("--crf", type=int, default=20,
                         help="constant quality value. smaller value is higher quality (video only)")
+    parser.add_argument("--video-bitrate", type=str, default="8M",
+                        help="bitrate option for libopenh264")
     parser.add_argument("--preset", type=str, default="ultrafast",
                         choices=["ultrafast", "superfast", "veryfast", "faster", "fast",
                                  "medium", "slow", "slower", "veryslow", "placebo"],

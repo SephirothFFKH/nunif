@@ -2,6 +2,9 @@
 "_LOCALE_LINUX": "ja_JP"
 "_LOCALE_WINDOWS": "Japanese_Japan"
 
+"Load": "読み込み"
+"Save": "保存"
+"Delete": "削除"
 "Input": "入力"
 "Output": "出力"
 "Choose a file": "ファイルを選択"
@@ -25,6 +28,7 @@
 "Finished": "完了"
 "Confirm": "確認"
 "already exists. Overwrite?": "すでに存在します。上書きしますか？"
+"Delete?": "削除しますか？"
 "`{}` must be a number {} - {}": "`{}` は {} から {} の数字でなければなりません"
 "Stereo Generation": "ステレオ生成"
 "3D Strength": "3Dの強さ"
@@ -42,6 +46,10 @@
 "Anaglyph Method": "アナグリフ方式"
 "Flicker Reduction": "ちらつき軽減"
 "(experimental)": "(実験的)"
+"Depth Only": "深度画像のみ"
+"Exporting depth images only.\nNote that exporting with this option cannot be imported.": "深度画像のみエクスポート\nこのオプションでエクスポートするとインポートできないことに注意"
+"Resize to fit": "サイズを合わせる"
+"Resize depth images to the same size as rgb images.": "深度画像をRGB画像と同じサイズにリサイズ"
 
 "Video Encoding": "動画圧縮"
 
@@ -51,6 +59,7 @@
 "Pixel Format": "ピクセルフォーマット"
 "Colorspace": "色空間"
 "CRF": "CRF(固定品質)"
+"Bitrate": "ビットレート"
 "Level": "レベル"
 "Preset": "プリセット"
 "Tune": "チューニング"

@@ -141,28 +141,54 @@ def make_grid(batch, width, height, device):
     return grid
 
 
-def apply_divergence_grid_sample(c, depth, divergence, convergence):
+def apply_divergence_grid_sample(c, depth, divergence, convergence, synthetic_view):
+    assert synthetic_view in {"both", "right", "left"}
     # BCHW
     B, _, H, W = depth.shape
+
+    if synthetic_view != "both":
+        divergence = divergence * 2
+
     shift_size = divergence * 0.01
     index_shift = depth * shift_size - (shift_size * convergence)
     delta = torch.cat([index_shift, torch.zeros_like(index_shift)], dim=1)
     grid = make_grid(B, W, H, c.device)
-    left_eye = backward_warp(c, grid, -delta, 1)
-    right_eye = backward_warp(c, grid, delta, 1)
+
+    if synthetic_view == "both":
+        left_eye = backward_warp(c, grid, -delta, 1)
+        right_eye = backward_warp(c, grid, delta, 1)
+    elif synthetic_view == "right":
+        left_eye = c
+        right_eye = backward_warp(c, grid, delta, 1)
+    elif synthetic_view == "left":
+        left_eye = backward_warp(c, grid, -delta, 1)
+        right_eye = c
 
     return left_eye, right_eye
 
 
 def apply_divergence_nn_LR(model, c, depth, divergence, convergence,
-                           mapper, enable_amp):
+                           mapper, synthetic_view, enable_amp):
+    assert synthetic_view in {"both", "right", "left"}
     if getattr(model, "symmetric", False):
-        left_eye, right_eye = apply_divergence_nn_symmetric(model, c, depth, divergence, convergence, mapper, enable_amp)
+        left_eye, right_eye = apply_divergence_nn_symmetric(
+            model, c, depth, divergence, convergence,
+            mapper=mapper, synthetic_view=synthetic_view, enable_amp=enable_amp)
     else:
-        left_eye = apply_divergence_nn(model, c, depth, divergence, convergence,
-                                       mapper, -1, enable_amp)
-        right_eye = apply_divergence_nn(model, c, depth, divergence, convergence,
-                                        mapper, 1, enable_amp)
+        if synthetic_view == "both":
+            left_eye = apply_divergence_nn(model, c, depth, divergence, convergence,
+                                           mapper, -1, enable_amp)
+            right_eye = apply_divergence_nn(model, c, depth, divergence, convergence,
+                                            mapper, 1, enable_amp)
+        elif synthetic_view == "right":
+            left_eye = c
+            right_eye = apply_divergence_nn(model, c, depth, divergence * 2, convergence,
+                                            mapper, 1, enable_amp)
+        elif synthetic_view == "left":
+            left_eye = apply_divergence_nn(model, c, depth, divergence * 2, convergence,
+                                           mapper, -1, enable_amp)
+            right_eye = c
+
     return left_eye, right_eye
 
 
@@ -194,11 +220,15 @@ def apply_divergence_nn(model, c, depth, divergence, convergence,
 
 
 def apply_divergence_nn_symmetric(model, c, depth, divergence, convergence,
-                                  mapper, enable_amp):
+                                  mapper, synthetic_view, enable_amp):
     # BCHW
+    assert synthetic_view in {"both", "right", "left"}
     assert model.delta_output
     assert model.symmetric
     B, _, H, W = depth.shape
+
+    if synthetic_view != "both":
+        divergence *= 2
 
     x = torch.stack([make_input_tensor(None, depth[i],
                                        divergence=divergence,
@@ -210,8 +240,16 @@ def apply_divergence_nn_symmetric(model, c, depth, divergence, convergence,
         delta = model(x)
     grid = make_grid(B, W, H, c.device)
     delta_scale = 1.0 / (W // 2 - 1)
-    left_eye = backward_warp(c, grid, delta, delta_scale)
-    right_eye = backward_warp(c, grid, -delta, delta_scale)
+
+    if synthetic_view == "both":
+        left_eye = backward_warp(c, grid, delta, delta_scale)
+        right_eye = backward_warp(c, grid, -delta, delta_scale)
+    elif synthetic_view == "right":
+        left_eye = c
+        right_eye = backward_warp(c, grid, -delta, delta_scale)
+    elif synthetic_view == "left":
+        left_eye = backward_warp(c, grid, delta, delta_scale)
+        right_eye = c
 
     return left_eye, right_eye
 
@@ -317,6 +355,9 @@ def make_video_codec_option(args):
                 options["tier"] = "high"
                 options["highbitdepth"] = "1"
                 options["split_encode_mode"] = "1"
+    elif args.video_codec == "libopenh264":
+        # NOTE: It seems libopenh264 does not support most options.
+        options = {"b": args.video_bitrate}
     else:
         options = {}
 
@@ -412,13 +453,14 @@ def apply_divergence(depth, im_org, args, side_model):
         depth = get_mapper(args.mapper)(depth)
         left_eye, right_eye = apply_divergence_grid_sample(
             im_org, depth,
-            args.divergence, convergence=args.convergence)
+            args.divergence, convergence=args.convergence,
+            synthetic_view=args.synthetic_view)
     elif args.method in {"forward", "forward_fill"}:
         depth = get_mapper(args.mapper)(depth)
         left_eye, right_eye = apply_divergence_forward_warp(
             im_org, depth,
             args.divergence, convergence=args.convergence,
-            method=args.method)
+            method=args.method, synthetic_view=args.synthetic_view)
     else:
         if args.stereo_width is not None:
             # NOTE: use src aspect ratio instead of depth aspect ratio
@@ -434,6 +476,7 @@ def apply_divergence(depth, im_org, args, side_model):
             side_model, im_org, depth,
             args.divergence, args.convergence,
             mapper=args.mapper,
+            synthetic_view=args.synthetic_view,
             enable_amp=not args.disable_amp)
 
     if not batch:
@@ -569,7 +612,9 @@ def process_images(files, output_dir, args, depth_model, side_model, title=None)
     pbar = tqdm_fn(ncols=80, total=len(files), desc=title)
     stop_event = args.state["stop_event"]
     suspend_event = args.state["suspend_event"]
-    with PoolExecutor(max_workers=4) as pool:
+
+    max_workers = max(args.max_workers, 8)
+    with PoolExecutor(max_workers=max_workers) as pool:
         for im, meta in loader:
             filename = meta["filename"]
             output_filename = path.join(
@@ -757,7 +802,9 @@ def process_video_keyframes(input_filename, output_path, args, depth_model, side
     if output_dir.endswith("_LRF"):
         output_dir = output_dir[:-4]
     os.makedirs(output_dir, exist_ok=True)
-    with PoolExecutor(max_workers=4) as pool:
+
+    max_workers = max(args.max_workers, 8)
+    with PoolExecutor(max_workers=max_workers) as pool:
         futures = []
 
         def frame_callback(frame):
@@ -858,7 +905,9 @@ def export_images(args):
     pbar = tqdm_fn(ncols=80, total=len(files), desc="Images")
     stop_event = args.state["stop_event"]
     suspend_event = args.state["suspend_event"]
-    with PoolExecutor(max_workers=4) as pool, torch.inference_mode():
+
+    max_workers = max(args.max_workers, 8)
+    with PoolExecutor(max_workers=max_workers) as pool, torch.inference_mode():
         for im, meta in loader:
             basename = path.splitext(path.basename(meta["filename"]))[0] + ".png"
             depth_file = path.join(depth_dir, basename)
@@ -870,6 +919,9 @@ def export_images(args):
             depth = depth_model.infer(im, tta=args.tta, low_vram=args.low_vram,
                                       enable_amp=not args.disable_amp,
                                       edge_dilation=edge_dilation)
+            if args.export_depth_fit:
+                depth = F.interpolate(depth.unsqueeze(0), size=(im_org.shape[1], im_org.shape[2]),
+                                      mode="bilinear", align_corners=True).squeeze(0)
             depth = depth_model.minmax_normalize(depth)
             if args.export_disparity:
                 depth = get_mapper(args.mapper)(depth)
@@ -891,12 +943,15 @@ def export_images(args):
 
 
 def get_resume_seq(depth_dir, rgb_dir):
+    last_seq = -1
     depth_files = sorted([path.basename(fn) for fn in ImageLoader.listdir(depth_dir)])
-    rgb_files = sorted([path.basename(fn) for fn in ImageLoader.listdir(rgb_dir)])
-    if rgb_files and depth_files:
-        last_seq = int(path.splitext(min(rgb_files[-1], depth_files[-1]))[0], 10)
+    if rgb_dir:
+        rgb_files = sorted([path.basename(fn) for fn in ImageLoader.listdir(rgb_dir)])
+        if rgb_files and depth_files:
+            last_seq = int(path.splitext(min(rgb_files[-1], depth_files[-1]))[0], 10)
     else:
-        last_seq = -1
+        if depth_files:
+            last_seq = int(path.splitext(depth_files[-1])[0], 10)
 
     return last_seq
 
@@ -923,6 +978,7 @@ def export_video(args):
             "export_options": {
                 "depth_model": args.depth_model,
                 "export_disparity": args.export_disparity,
+                "export_depth_only": args.export_depth_only,
                 "mapper": args.mapper,
                 "edge_dilation": args.edge_dilation,
                 "max_fps": args.max_fps,
@@ -942,7 +998,11 @@ def export_video(args):
         if y not in {"y", "ye", "yes"}:
             return
 
-    os.makedirs(rgb_dir, exist_ok=True)
+    if args.export_depth_only:
+        rgb_dir = None
+        config.rgb_dir = None
+    else:
+        os.makedirs(rgb_dir, exist_ok=True)
     os.makedirs(depth_dir, exist_ok=True)
 
     if args.resume:
@@ -953,11 +1013,14 @@ def export_video(args):
     if resume_seq > 0 and path.exists(audio_file):
         has_audio = True
     else:
-        has_audio = VU.export_audio(args.input, audio_file,
-                                    start_time=args.start_time, end_time=args.end_time,
-                                    title="Audio",
-                                    stop_event=args.state["stop_event"], suspend_event=args.state["suspend_event"],
-                                    tqdm_fn=args.state["tqdm_fn"])
+        if args.export_depth_only:
+            has_audio = False
+        else:
+            has_audio = VU.export_audio(args.input, audio_file,
+                                        start_time=args.start_time, end_time=args.end_time,
+                                        title="Audio",
+                                        stop_event=args.state["stop_event"], suspend_event=args.state["suspend_event"],
+                                        tqdm_fn=args.state["tqdm_fn"])
     if not has_audio:
         config.audio_file = None
 
@@ -1006,6 +1069,9 @@ def export_video(args):
             depths = depth_model.infer(x, tta=args.tta, low_vram=args.low_vram,
                                        enable_amp=not args.disable_amp,
                                        edge_dilation=edge_dilation)
+            if args.export_depth_fit:
+                depths = F.interpolate(depths, size=(x_orgs.shape[2], x_orgs.shape[3]),
+                                       mode="bilinear", align_corners=True)
             depths = depth_model.minmax_normalize(depths)
             if args.export_disparity:
                 depths = torch.stack([get_mapper(args.mapper)(depths[i]) for i in range(depths.shape[0])])
@@ -1013,11 +1079,20 @@ def export_video(args):
         depths = depths.detach().cpu()
         x_orgs = x_orgs.detach().cpu()
 
-        for x, depth, seq in zip(x_orgs, depths, pts):
-            seq = str(seq).zfill(8)
-            depth_model.save_depth(depth[0], path.join(depth_dir, f"{seq}.png"), normalize=False)
-            rgb = TF.to_pil_image(x)
-            rgb.save(path.join(rgb_dir, f"{seq}.png"))
+        max_workers = max(8 - args.max_workers, 1)
+        with PoolExecutor(max_workers=max_workers) as pool:  # io thread
+            futures = []
+            for x, depth, seq in zip(x_orgs, depths, pts):
+                seq = str(seq).zfill(8)
+                futures.append(
+                    pool.submit(depth_model.save_depth, depth[0],
+                                path.join(depth_dir, f"{seq}.png"), normalize=False))
+                if not args.export_depth_only:
+                    rgb = TF.to_pil_image(x)
+                    futures.append(pool.submit(save_image, rgb, path.join(rgb_dir, f"{seq}.png")))
+            # sync and check exception
+            for f in futures:
+                f.result()
 
     def _batch_callback(x, pts):
         if args.cuda_stream and device_is_cuda(x.device):
@@ -1310,6 +1385,10 @@ def create_parser(required_true=True):
                                  "row_flow_v3", "row_flow_v3_sym",
                                  "row_flow_v2"],
                         help="left-right divergence method")
+    parser.add_argument("--synthetic-view", type=str, default="both", choices=["both", "right", "left"],
+                        help=("the side that generates synthetic view."
+                              "when `right`, the left view will be the original input image/frame"
+                              " and only the right will be synthesized."))
     parser.add_argument("--divergence", "-d", type=float, default=2.0,
                         help=("strength of 3D effect. 0-2 is reasonable value"))
     parser.add_argument("--convergence", "-c", type=float, default=0.5,
@@ -1327,6 +1406,8 @@ def create_parser(required_true=True):
     parser.add_argument("--profile-level", type=str, help="h264 profile level")
     parser.add_argument("--crf", type=int, default=20,
                         help="constant quality value for video. smaller value is higher quality")
+    parser.add_argument("--video-bitrate", type=str, default="8M",
+                        help="bitrate option for libopenh264")
     parser.add_argument("--preset", type=str, default="ultrafast",
                         choices=["ultrafast", "superfast", "veryfast", "faster", "fast",
                                  "medium", "slow", "slower", "veryslow", "placebo"],
@@ -1346,7 +1427,7 @@ def create_parser(required_true=True):
                                  "Any_V2_N", "Any_V2_K",
                                  "Any_V2_N_S", "Any_V2_N_B", "Any_V2_N_L",
                                  "Any_V2_K_S", "Any_V2_K_B", "Any_V2_K_L",
-                                 "DepthPro", "DepthPro_HD", "DepthPro_SD",
+                                 "DepthPro", "DepthPro_S",
                                  ],
                         help="depth model name")
     parser.add_argument("--remove-bg", action="store_true",
@@ -1373,6 +1454,10 @@ def create_parser(required_true=True):
     parser.add_argument("--export-disparity", action="store_true",
                         help=("export dispary instead of depth. "
                               "this means applying --mapper and --foreground-scale."))
+    parser.add_argument("--export-depth-only", action="store_true",
+                        help=("output only depth image and omits rgb image"))
+    parser.add_argument("--export-depth-fit", action="store_true",
+                        help=("fit depth image size to rgb image"))
     parser.add_argument("--mapper", type=str,
                         choices=["auto", "pow2", "softplus", "softplus2",
                                  "div_6", "div_4", "div_2", "div_1",
@@ -1482,6 +1567,10 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
 
     if args.export_disparity:
         args.export = True
+    if args.export_depth_only and not args.export:
+        raise ValueError("--export-depth-only must be specified together with --export or --export-disparity")
+    if args.export_depth_fit and not args.export:
+        raise ValueError("--export-depth-fit must be specified together with --export or --export-disparity")
 
     if is_video(args.output):
         # replace --video-format when filename is specified
@@ -1620,28 +1709,32 @@ def iw3_main(args):
         if not is_output_dir(args.output):
             raise ValueError("-o must be a directory")
         if not args.recursive:
-            image_files = ImageLoader.listdir(args.input)
-            process_images(image_files, args.output, args, depth_model, side_model, title="Images")
-            gc_collect()
-            for video_file in VU.list_videos(args.input):
-                if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
-                    return args
-                process_video(video_file, args.output, args, depth_model, side_model)
+            if depth_model.is_image_supported():
+                image_files = ImageLoader.listdir(args.input)
+                process_images(image_files, args.output, args, depth_model, side_model, title="Images")
                 gc_collect()
+            if depth_model.is_video_supported():
+                for video_file in VU.list_videos(args.input):
+                    if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
+                        return args
+                    process_video(video_file, args.output, args, depth_model, side_model)
+                    gc_collect()
         else:
             subdirs = list_subdir(args.input, include_root=True, excludes=args.output)
             for input_dir in subdirs:
                 output_dir = path.normpath(path.join(args.output, path.relpath(input_dir, start=args.input)))
-                image_files = ImageLoader.listdir(input_dir)
-                if image_files:
-                    process_images(image_files, output_dir, args, depth_model, side_model,
-                                   title=path.relpath(input_dir, args.input))
-                    gc_collect()
-                for video_file in VU.list_videos(input_dir):
-                    if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
-                        return args
-                    process_video(video_file, output_dir, args, depth_model, side_model)
-                    gc_collect()
+                if depth_model.is_image_supported():
+                    image_files = ImageLoader.listdir(input_dir)
+                    if image_files:
+                        process_images(image_files, output_dir, args, depth_model, side_model,
+                                       title=path.relpath(input_dir, args.input))
+                        gc_collect()
+                if depth_model.is_video_supported():
+                    for video_file in VU.list_videos(input_dir):
+                        if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
+                            return args
+                        process_video(video_file, output_dir, args, depth_model, side_model)
+                        gc_collect()
 
     elif is_yaml(args.input):
         config = export_config.ExportConfig.load(args.input)
@@ -1658,17 +1751,23 @@ def iw3_main(args):
                 line = line.strip()
                 if not line.startswith("#"):
                     files.append(line.strip())
-        image_files = [f for f in files if is_image(f)]
-        process_images(image_files, args.output, args, depth_model, side_model, title="Images")
-        video_files = [f for f in files if is_video(f)]
-        for video_file in video_files:
-            if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
-                return args
-            process_video(video_file, args.output, args, depth_model, side_model)
-            gc_collect()
+        if depth_model.is_image_supported():
+            image_files = [f for f in files if is_image(f)]
+            process_images(image_files, args.output, args, depth_model, side_model, title="Images")
+        if depth_model.is_video_supported():
+            video_files = [f for f in files if is_video(f)]
+            for video_file in video_files:
+                if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
+                    return args
+                process_video(video_file, args.output, args, depth_model, side_model)
+                gc_collect()
     elif is_video(args.input):
+        if not depth_model.is_video_supported():
+            raise ValueError(f"{args.depth_model} does not support video input")
         process_video(args.input, args.output, args, depth_model, side_model)
     elif is_image(args.input):
+        if not depth_model.is_image_supported():
+            raise ValueError(f"{args.depth_model} does not support image input")
         if is_output_dir(args.output):
             os.makedirs(args.output, exist_ok=True)
             output_filename = path.join(

@@ -1,6 +1,6 @@
 import wx
 from .common import EditableComboBox
-
+import av
 
 LEVEL_LIBX264 = ["3.0", "3.1", "3.2", "4.0", "4.1", "4.2", "5.0", "5.1", "5.2", "6.0", "6.2"]
 LEVEL_LIBX265 = ["3.0", "3.1", "4.0", "4.1", "5.0", "5.1", "5.2", "6.0", "6.1", "6.2", "8.5"]
@@ -16,9 +16,18 @@ PRESET_LIBX264 = ["ultrafast", "superfast", "veryfast", "faster", "fast",
 PRESET_NVENC = ["fast", "medium", "slow", "p1", "p2", "p3", "p4", "p5", "p6", "p7"]
 PRESET_ALL = PRESET_LIBX264
 
+CODEC_ALL = ["libx264", "libopenh264", "libx265", "h264_nvenc", "hevc_nvenc", "utvideo"]
+
+PIX_FMT_ALL = ["yuv420p", "yuv444p", "rgb24", "p016le"]
+PIX_FMT_OPEN_H264 = ["yuv420p"]
+
 
 def empty_translate_function(s):
     return s
+
+
+def codecs_available(codecs):
+    return [codec for codec in codecs if codec in av.codec.codecs_available]
 
 
 class VideoEncodingBox():
@@ -36,7 +45,7 @@ class VideoEncodingBox():
 
         self.lbl_video_codec = wx.StaticText(self.grp_video, label=T("Video Codec"))
         self.cbo_video_codec = EditableComboBox(
-            self.grp_video, choices=["libx264", "libx265", "h264_nvenc", "hevc_nvenc", "utvideo"],
+            self.grp_video, choices=CODEC_ALL,
             name=f"{prefix}cbo_video_codec")
         self.cbo_video_codec.SetSelection(0)
 
@@ -47,7 +56,7 @@ class VideoEncodingBox():
         self.cbo_fps.SetSelection(3)
 
         self.lbl_pix_fmt = wx.StaticText(self.grp_video, label=T("Pixel Format"))
-        self.cbo_pix_fmt = wx.ComboBox(self.grp_video, choices=["yuv420p", "yuv444p", "rgb24", "p016le"],
+        self.cbo_pix_fmt = wx.ComboBox(self.grp_video, choices=PIX_FMT_ALL,
                                        style=wx.CB_READONLY, name=f"{prefix}cbo_pix_fmt")
         self.cbo_pix_fmt.SetSelection(0)
 
@@ -62,6 +71,11 @@ class VideoEncodingBox():
         self.cbo_crf = EditableComboBox(self.grp_video, choices=[str(n) for n in range(16, 28)],
                                         name=f"{prefix}cbo_crf")
         self.cbo_crf.SetSelection(4)
+
+        self.lbl_bitrate = wx.StaticText(self.grp_video, label=T("Bitrate"))
+        self.cbo_bitrate = EditableComboBox(self.grp_video, choices=["160M", "50M", "16M", "12M", "8M", "4M"],
+                                            name=f"{prefix}cbo_bitrate")
+        self.cbo_bitrate.SetSelection(4)
 
         self.lbl_profile_level = wx.StaticText(self.grp_video, label=T("Level"))
         self.cbo_profile_level = EditableComboBox(self.grp_video, choices=LEVEL_ALL, name=f"{prefix}cbo_profile_level")
@@ -86,6 +100,7 @@ class VideoEncodingBox():
         self.chk_tune_zerolatency.SetValue(False)
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
+        layout.SetEmptyCellSize((0, 0))
         layout.Add(self.lbl_fps, (0, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_fps, (0, 1), flag=wx.EXPAND)
         layout.Add(self.lbl_video_format, (1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -98,15 +113,17 @@ class VideoEncodingBox():
         layout.Add(self.cbo_colorspace, (4, 1), flag=wx.EXPAND)
         layout.Add(self.lbl_crf, (5, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_crf, (5, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_profile_level, (6, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_profile_level, (6, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_bitrate, (6, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_bitrate, (6, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_profile_level, (7, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_profile_level, (7, 1), flag=wx.EXPAND)
 
-        layout.Add(self.lbl_preset, (7, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_preset, (7, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_tune, (8, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_tune, (8, 1), flag=wx.EXPAND)
-        layout.Add(self.chk_tune_fastdecode, (9, 1), flag=wx.EXPAND)
-        layout.Add(self.chk_tune_zerolatency, (10, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_preset, (8, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_preset, (8, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_tune, (9, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_tune, (9, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_tune_fastdecode, (10, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_tune_zerolatency, (11, 1), flag=wx.EXPAND)
 
         self.box_sizer = wx.StaticBoxSizer(self.grp_video, wx.VERTICAL)
         self.box_sizer.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
@@ -153,6 +170,10 @@ class VideoEncodingBox():
     @property
     def crf(self):
         return int(self.cbo_crf.GetValue())
+
+    @property
+    def bitrate(self):
+        return self.cbo_bitrate.GetValue()
 
     @property
     def profile_level(self):
@@ -202,14 +223,14 @@ class VideoEncodingBox():
 
         # codec
         if name == "avi":
-            choices = ["utvideo"]
+            choices = codecs_available(["utvideo"])
         else:
-            choices = ["libx264", "libx265"]
+            choices = codecs_available(["libx264", "libopenh264", "libx265"])
             if self.has_nvenc:
-                choices += ["h264_nvenc", "hevc_nvenc"]
+                choices += codecs_available(["h264_nvenc", "hevc_nvenc"])
 
         user_codec = self.cbo_video_codec.GetValue()
-        if user_codec not in {"libx265", "libx264", "h264_nvenc", "hevc_nvenc", "utvideo"}:
+        if user_codec not in {"libx265", "libx264", "libopenh264", "h264_nvenc", "hevc_nvenc", "utvideo"}:
             choices.append(user_codec)
         self.cbo_video_codec.SetItems(choices)
         if user_codec in choices:
@@ -221,6 +242,46 @@ class VideoEncodingBox():
     def update_video_codec(self):
         container_format = self.cbo_video_format.GetValue()
         codec = self.cbo_video_codec.GetValue()
+
+        # enabel/disable options
+        if container_format == "avi" or codec == "libopenh264":
+            self.cbo_profile_level.Disable()
+            self.cbo_crf.Disable()
+            self.cbo_preset.Disable()
+            self.cbo_tune.Disable()
+            self.chk_tune_fastdecode.Disable()
+            self.chk_tune_zerolatency.Disable()
+        else:
+            self.cbo_profile_level.Enable()
+            self.cbo_crf.Enable()
+            self.cbo_preset.Enable()
+            self.cbo_tune.Enable()
+            self.chk_tune_fastdecode.Enable()
+            self.chk_tune_zerolatency.Enable()
+
+        # crf
+        if codec == "libopenh264":
+            self.lbl_bitrate.Show()
+            self.cbo_bitrate.Show()
+            self.lbl_crf.Hide()
+            self.cbo_crf.Hide()
+        else:
+            self.lbl_bitrate.Hide()
+            self.cbo_bitrate.Hide()
+            self.lbl_crf.Show()
+            self.cbo_crf.Show()
+
+        # pix_fmt
+        user_pix_fmt = self.cbo_pix_fmt.GetValue()
+        if codec == "libopenh264":
+            choices = PIX_FMT_OPEN_H264
+        else:
+            choices = PIX_FMT_ALL
+        self.cbo_pix_fmt.SetItems(choices)
+        if user_pix_fmt in choices:
+            self.cbo_pix_fmt.SetSelection(choices.index(user_pix_fmt))
+        else:
+            self.cbo_pix_fmt.SetSelection(0)
 
         # level
         user_level = self.cbo_profile_level.GetValue()
@@ -240,7 +301,7 @@ class VideoEncodingBox():
         # preset
         if container_format in {"mp4", "mkv"}:
             preset = self.cbo_preset.GetValue()
-            if codec in {"libx265", "libx264"}:
+            if codec in {"libx265", "libx264", "libopenh264"}:
                 # preset
                 choices = PRESET_LIBX264
                 default_preset = "ultrafast"
@@ -310,3 +371,6 @@ class VideoEncodingBox():
                 self.chk_tune_fastdecode.Disable()
                 self.chk_tune_zerolatency.SetValue(False)
                 self.chk_tune_zerolatency.Disable()
+
+        # update Layout
+        self.sizer.Layout()

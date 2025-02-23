@@ -151,15 +151,11 @@ I have tested the results with the following software.
 Pigasus works perfectly for SBS 3D videos, images, and Samba drive(SMB).
 However, I am not a big fan of its user interface and user experience.
 
-If you can only choose one software, I would recommend this one.
-
 ### SKYBOX VR Video Player
 
-With recent updates(v1.1.6), most features of 3D Full SBS are now working.
-However, the following features have not yet been implemented.
+With recent updates, most features of 3D Full SBS are now working.
 
-- No ability to navigate prev/next images with joystick
-- Screen height position is not adjustable
+To adjust the screen position, you must select `Cinema Scene > SELECT THEATER > VOID`.
 
 ## About file naming rule
 
@@ -181,7 +177,7 @@ When `--vr180` option is specified, the video is output in VR180 format (equirec
 
 This is usually not recommended because of poor usability during playback.
 
-This is useful if your video player does not have the ability to play Full SBS 3D videos or if you want to post the video on Youtube.
+This is useful if your video player does not have the ability to play Full SBS 3D videos or if you want to post the video on Youtube (See https://github.com/nagadomi/nunif/issues/268 ) .
 
 ## Half SBS format
 

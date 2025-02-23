@@ -18,10 +18,12 @@ from nunif.initializer import gc_collect
 from nunif.device import mps_is_available, xpu_is_available
 from nunif.utils.image_loader import IMG_EXTENSIONS as LOADER_SUPPORTED_EXTENSIONS
 from nunif.utils.video import VIDEO_EXTENSIONS as KNOWN_VIDEO_EXTENSIONS, has_nvenc
+from nunif.utils.filename import sanitize_filename
 from nunif.gui import (
     TQDMGUI, FileDropCallback, EVT_TQDM, TimeCtrl,
     EditableComboBox, EditableComboBoxPersistentHandler,
-    persistent_manager_register_all, persistent_manager_restore_all, persistent_manager_register,
+    persistent_manager_register_all, persistent_manager_unregister_all,
+    persistent_manager_restore_all, persistent_manager_register,
     extension_list_to_wildcard, validate_number,
     set_icon_ex,
     VideoEncodingBox, IOPathPanel
@@ -38,8 +40,11 @@ import torch
 IMAGE_EXTENSIONS = extension_list_to_wildcard(LOADER_SUPPORTED_EXTENSIONS)
 VIDEO_EXTENSIONS = extension_list_to_wildcard(KNOWN_VIDEO_EXTENSIONS)
 YAML_EXTENSIONS = extension_list_to_wildcard((".yml", ".yaml"))
-CONFIG_PATH = path.join(path.dirname(__file__), "..", "tmp", "iw3-gui.cfg")
-os.makedirs(path.dirname(CONFIG_PATH), exist_ok=True)
+CONFIG_DIR = path.join(path.dirname(__file__), "..", "tmp")
+CONFIG_PATH = path.join(CONFIG_DIR, "iw3-gui.cfg")
+PRESET_DIR = path.join(CONFIG_DIR, "presets")
+os.makedirs(CONFIG_DIR, exist_ok=True)
+os.makedirs(PRESET_DIR, exist_ok=True)
 
 
 LAYOUT_DEBUG = False
@@ -168,7 +173,8 @@ class MainFrame(wx.Frame):
         self.sld_ipd_offset.SetToolTip("IPD Offset")
 
         self.lbl_method = wx.StaticText(self.grp_stereo, label=T("Method"))
-        self.cbo_method = wx.ComboBox(self.grp_stereo, choices=["row_flow_v3", "row_flow_v2", "forward_fill"],
+        self.cbo_method = wx.ComboBox(self.grp_stereo,
+                                      choices=["row_flow_v3", "row_flow_v3_sym", "row_flow_v2", "forward_fill"],
                                       style=wx.CB_READONLY, name="cbo_method")
         self.cbo_method.SetSelection(0)
 
@@ -183,7 +189,7 @@ class MainFrame(wx.Frame):
         depth_models = [
             "ZoeD_N", "ZoeD_K", "ZoeD_NK",
             "ZoeD_Any_N", "ZoeD_Any_K",
-#            "DepthPro_SD", "DepthPro_HD", "DepthPro",
+            "DepthPro", "DepthPro_S",
             "Any_S", "Any_B", "Any_L",
             "Any_V2_S",
         ]
@@ -258,10 +264,20 @@ class MainFrame(wx.Frame):
         self.cbo_ema_decay = EditableComboBox(self.grp_stereo, choices=["0.99", "0.9", "0.75", "0.5"],
                                               name="cbo_ema_decay")
         self.cbo_ema_decay.SetSelection(2)
-
         self.chk_ema_normalize.SetToolTip(T("Video Only") + " " + T("(experimental)"))
 
-        layout = wx.FlexGridSizer(rows=12, cols=2, vgap=4, hgap=4)
+        self.chk_export_depth_only = wx.CheckBox(self.grp_stereo, label=T("Depth Only"), name="chk_export_depth_only")
+        self.chk_export_depth_only.SetValue(False)
+        self.chk_export_depth_only.SetToolTip(T("Exporting depth images only.\n"
+                                                "Note that exporting with this option cannot be imported."))
+        self.chk_export_depth_only.Hide()
+
+        self.chk_export_depth_fit = wx.CheckBox(self.grp_stereo, label=T("Resize to fit"), name="chk_export_depth_fit")
+        self.chk_export_depth_fit.SetValue(False)
+        self.chk_export_depth_fit.SetToolTip(T("Resize depth images to the same size as rgb images."))
+        self.chk_export_depth_fit.Hide()
+
+        layout = wx.FlexGridSizer(rows=13, cols=2, vgap=4, hgap=4)
         layout.Add(self.lbl_divergence, 0, wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_divergence, 1, wx.EXPAND)
         layout.Add(self.lbl_convergence, 0, wx.ALIGN_CENTER_VERTICAL)
@@ -286,6 +302,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_stereo_format, 1, wx.EXPAND)
         layout.Add(self.lbl_anaglyph_method, 0, wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_anaglyph_method, 1, wx.EXPAND)
+        layout.Add(self.chk_export_depth_only, 0, wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_export_depth_fit, 1, wx.ALIGN_CENTER_VERTICAL)
 
         sizer_stereo = wx.StaticBoxSizer(self.grp_stereo, wx.VERTICAL)
         sizer_stereo.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
@@ -446,6 +464,25 @@ class MainFrame(wx.Frame):
         layout.Add(sizer_processor, (1, 2), flag=wx.ALL | wx.EXPAND, border=4)
         self.pnl_options.SetSizer(layout)
 
+        # preset panel
+        self.pnl_preset = wx.Panel(self)
+        self.lbl_preset = wx.StaticText(self.pnl_preset, label=" " + T("Preset"))
+        self.cbo_app_preset = EditableComboBox(self.pnl_preset, choices=self.list_preset(),
+                                           size=(200, -1),
+                                           name="cbo_app_preset")
+        self.cbo_app_preset.SetSelection(0)
+        self.btn_load_preset = wx.Button(self.pnl_preset, label=T("Load"))
+        self.btn_save_preset = wx.Button(self.pnl_preset, label=T("Save"))
+        self.btn_delete_preset = wx.Button(self.pnl_preset, label=T("Delete"))
+
+        layout = wx.BoxSizer(wx.HORIZONTAL)
+        layout.Add(self.lbl_preset, 0, wx.ALIGN_CENTER_VERTICAL, 2)
+        layout.Add(self.cbo_app_preset, 0, wx.ALL, 2)
+        layout.Add(self.btn_load_preset, 0, wx.ALL, 2)
+        layout.Add(self.btn_save_preset, 0, wx.ALL, 2)
+        layout.Add(self.btn_delete_preset, 0, wx.ALL, 2)
+        self.pnl_preset.SetSizer(layout)
+
         # processing panel
         self.pnl_process = wx.Panel(self)
         if LAYOUT_DEBUG:
@@ -466,6 +503,7 @@ class MainFrame(wx.Frame):
 
         layout = wx.BoxSizer(wx.VERTICAL)
         layout.AddSpacer(8)
+        layout.Add(self.pnl_preset, 0, wx.ALL | wx.EXPAND, 2)
         layout.Add(self.pnl_file.panel, 0, wx.ALL | wx.EXPAND, 8)
         layout.Add(self.pnl_file_option, 0, wx.ALL | wx.EXPAND, 4)
         layout.Add(self.pnl_options, 1, wx.ALL | wx.EXPAND, 8)
@@ -482,6 +520,10 @@ class MainFrame(wx.Frame):
 
         self.cbo_stereo_format.Bind(wx.EVT_TEXT, self.on_selected_index_changed_cbo_stereo_format)
 
+        self.btn_load_preset.Bind(wx.EVT_BUTTON, self.on_click_btn_load_preset)
+        self.btn_save_preset.Bind(wx.EVT_BUTTON, self.on_click_btn_save_preset)
+        self.btn_delete_preset.Bind(wx.EVT_BUTTON, self.on_click_btn_delete_preset)
+
         self.btn_start.Bind(wx.EVT_BUTTON, self.on_click_btn_start)
         self.btn_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_cancel)
         self.btn_suspend.Bind(wx.EVT_BUTTON, self.on_click_btn_suspend)
@@ -489,16 +531,7 @@ class MainFrame(wx.Frame):
         self.Bind(EVT_TQDM, self.on_tqdm)
         self.Bind(wx.EVT_CLOSE, self.on_close)
 
-        editable_comboboxes = [
-            self.cbo_divergence,
-            self.cbo_convergence,
-            self.cbo_resolution,
-            self.cbo_stereo_width,
-            self.cbo_edge_dilation,
-            self.cbo_ema_decay,
-            *self.grp_video.get_editable_comboboxes(),
-            self.cbo_foreground_scale,
-        ]
+        editable_comboboxes = self.get_editable_comboboxes()
 
         self.SetDropTarget(FileDropCallback(self.on_drop_files))
         # Disable default drop target
@@ -513,23 +546,33 @@ class MainFrame(wx.Frame):
         self.btn_cancel.Disable()
         self.btn_suspend.Disable()
 
-        self.persistence_manager = persist.PersistenceManager.Get()
-        self.persistence_manager.SetManagerStyle(persist.PM_DEFAULT_STYLE)
-        self.persistence_manager.SetPersistenceFile(CONFIG_PATH)
-        persistent_manager_register_all(self.persistence_manager, self)
-        for control in editable_comboboxes:
-            persistent_manager_register(self.persistence_manager, control, EditableComboBoxPersistentHandler)
-        persistent_manager_restore_all(self.persistence_manager)
+        self.load_preset()
 
         self.update_start_button_state()
         self.update_rembg_state()
         self.update_input_option_state()
         self.update_anaglyph_state()
+        self.update_export_option_state()
+
         if not self.chk_edge_dilation.IsChecked():
             self.update_model_selection()
         self.update_edge_dilation()
         self.update_ema_normalize()
         self.grp_video.update_controls()
+
+    def get_editable_comboboxes(self):
+        editable_comboboxes = [
+            self.cbo_divergence,
+            self.cbo_convergence,
+            self.cbo_resolution,
+            self.cbo_stereo_width,
+            self.cbo_edge_dilation,
+            self.cbo_ema_decay,
+            *self.grp_video.get_editable_comboboxes(),
+            self.cbo_foreground_scale,
+            self.cbo_app_preset,
+        ]
+        return editable_comboboxes
 
     def get_anaglyph_method(self):
         if self.cbo_stereo_format.GetValue() == "Anaglyph":
@@ -539,7 +582,7 @@ class MainFrame(wx.Frame):
         return anaglyph
 
     def on_close(self, event):
-        self.persistence_manager.SaveAndUnregister()
+        self.save_preset()
         event.Skip()
 
     def on_drop_files(self, x, y, filenames):
@@ -643,12 +686,22 @@ class MainFrame(wx.Frame):
             self.cbo_anaglyph_method.Hide()
         self.GetSizer().Layout()
 
+    def update_export_option_state(self):
+        if self.cbo_stereo_format.GetValue() in {"Export", "Export disparity"}:
+            self.chk_export_depth_only.Show()
+            self.chk_export_depth_fit.Show()
+        else:
+            self.chk_export_depth_only.Hide()
+            self.chk_export_depth_fit.Hide()
+        self.GetSizer().Layout()
+
     def on_selected_index_changed_cbo_depth_model(self, event):
         self.update_model_selection()
 
     def on_selected_index_changed_cbo_stereo_format(self, event):
         self.update_input_option_state()
         self.update_anaglyph_state()
+        self.update_export_option_state()
 
     def on_selected_index_changed_cbo_video_format(self, event):
         self.update_video_format()
@@ -764,6 +817,13 @@ class MainFrame(wx.Frame):
         anaglyph = self.get_anaglyph_method()
         export = self.cbo_stereo_format.GetValue() == "Export"
         export_disparity = self.cbo_stereo_format.GetValue() == "Export disparity"
+        if export or export_disparity:
+            export_depth_only = self.chk_export_depth_only.IsChecked()
+            export_depth_fit = self.chk_export_depth_fit.IsChecked()
+        else:
+            export_depth_only = None
+            export_depth_fit = None
+
         debug_depth = self.cbo_stereo_format.GetValue() == "Debug Depth"
 
         if self.cbo_pad.GetValue():
@@ -834,8 +894,12 @@ class MainFrame(wx.Frame):
             half_tb=half_tb,
             cross_eyed=cross_eyed,
             anaglyph=anaglyph,
+
             export=export,
             export_disparity=export_disparity,
+            export_depth_only=export_depth_only,
+            export_depth_fit=export_depth_fit,
+
             debug_depth=debug_depth,
             ema_normalize=self.chk_ema_normalize.GetValue(),
             ema_decay=float(self.cbo_ema_decay.GetValue()),
@@ -848,6 +912,7 @@ class MainFrame(wx.Frame):
             video_format=self.grp_video.video_format,
             video_codec=self.grp_video.video_codec,
             crf=self.grp_video.crf,
+            video_bitrate=self.grp_video.bitrate,
             profile_level=self.grp_video.profile_level,
             preset=self.grp_video.preset,
             tune=self.grp_video.tune,
@@ -992,6 +1057,109 @@ class MainFrame(wx.Frame):
         elif type == 2:
             # close
             pass
+
+    def save_preset(self, name=None):
+        if not name:
+            restore_path = True
+            name = ""
+            config_file = CONFIG_PATH
+        else:
+            restore_path = False
+            name = sanitize_filename(name)
+            config_file = path.join(PRESET_DIR, f"{name}.cfg")
+            if path.exists(config_file):
+                with wx.MessageDialog(None,
+                                      message=name + "\n" + T("already exists. Overwrite?"),
+                                      caption=T("Confirm"), style=wx.YES_NO) as dlg:
+                    if dlg.ShowModal() != wx.ID_YES:
+                        return
+
+        input_path = self.pnl_file.input_path
+        output_path = self.pnl_file.output_path
+        preset = name
+        try:
+            if not restore_path:
+                self.pnl_file.set_input_path("")
+                self.pnl_file.set_output_path("")
+            self.cbo_app_preset.SetValue("")
+            manager = persist.PersistenceManager.Get()
+            manager.SetManagerStyle(persist.PM_DEFAULT_STYLE)
+            manager.SetPersistenceFile(config_file)
+            persistent_manager_register_all(manager, self)
+            for control in self.get_editable_comboboxes():
+                persistent_manager_register(manager, control, EditableComboBoxPersistentHandler)
+            manager.SaveAndUnregister()
+            self.reload_preset()
+        finally:
+            if not restore_path:
+                self.pnl_file.set_input_path(input_path)
+                self.pnl_file.set_output_path(output_path)
+            self.cbo_app_preset.SetValue(preset)
+
+    def list_preset(self):
+        presets = [""]
+        for fn in os.listdir(PRESET_DIR):
+            name = path.splitext(fn)[0]
+            presets.append(name)
+        return presets
+
+    def reload_preset(self):
+        selected = self.cbo_app_preset.GetValue()
+        choices = self.list_preset()
+        self.cbo_app_preset.SetItems(choices)
+        if selected in choices:
+            self.cbo_app_preset.SetSelection(choices.index(selected))
+
+    def load_preset(self, name=None):
+        if not name:
+            restore_path = True
+            name = ""
+            config_file = CONFIG_PATH
+        else:
+            restore_path = False
+            name = sanitize_filename(name)
+            config_file = path.join(PRESET_DIR, f"{name}.cfg")
+
+        input_path = self.pnl_file.input_path
+        output_path = self.pnl_file.output_path
+        preset = name
+        try:
+            manager = persist.PersistenceManager.Get()
+            manager.SetManagerStyle(persist.PM_DEFAULT_STYLE)
+            manager.SetPersistenceFile(config_file)
+            persistent_manager_register_all(manager, self)
+            for control in self.get_editable_comboboxes():
+                persistent_manager_register(manager, control, EditableComboBoxPersistentHandler)
+            persistent_manager_restore_all(manager)
+            persistent_manager_unregister_all(manager)
+        finally:
+            if not restore_path:
+                self.pnl_file.set_input_path(input_path)
+                self.pnl_file.set_output_path(output_path)
+            self.cbo_app_preset.SetValue(preset)
+
+    def delete_preset(self, name=None):
+        if not name:
+            return
+        config_file = path.join(PRESET_DIR, f"{name}.cfg")
+        if path.exists(config_file):
+            with wx.MessageDialog(None,
+                                  message=name + "\n" + T("Delete?"),
+                                  caption=T("Confirm"), style=wx.YES_NO) as dlg:
+                if dlg.ShowModal() != wx.ID_YES:
+                    return
+            os.unlink(config_file)
+        self.reload_preset()
+
+    def on_click_btn_load_preset(self, event):
+        self.load_preset(self.cbo_app_preset.GetValue())
+
+    def on_click_btn_save_preset(self, event):
+        self.save_preset(self.cbo_app_preset.GetValue())
+
+    def on_click_btn_delete_preset(self, event):
+        self.delete_preset(self.cbo_app_preset.GetValue())
+        event.Skip()
 
 
 LOCALE_DICT = LOCALES.get(locale.getlocale()[0], {})

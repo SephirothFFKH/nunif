@@ -22,6 +22,7 @@ def configure_optim_groups(model, weight_decay=0.01):
     whitelist_weight_modules = (
         torch.nn.Linear,
         torch.nn.Conv2d,
+        torch.nn.Conv1d,
         torch.nn.ConvTranspose2d,
     )
     blacklist_weight_modules = (
@@ -30,6 +31,7 @@ def configure_optim_groups(model, weight_decay=0.01):
         torch.nn.BatchNorm2d,
         torch.nn.BatchNorm1d,
         torch.nn.GroupNorm,
+        torch.nn.RMSNorm,
         LayerNormNoBias2d,
         RMSNorm,
         RMSNorm1,
