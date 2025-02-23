@@ -739,16 +739,25 @@ def process_video(input_path, output_path,
     streams = [video_input_stream] + [s[0] for s in audio_output_streams] + [s[0] for s in subtitle_output_streams]
 
     ctx = video_input_stream.codec_context
+    cuvid_dec_test=False
     if((video_input_stream.codec.name+'_cuvid') in av.codec.codecs_available):
         ctx = av.Codec((video_input_stream.codec.name+'_cuvid'), 'r').create()
         ctx.extradata = video_input_stream.codec_context.extradata
         video_input_stream.thread_type = "AUTO"
+        cuvid_dec_test=True
 
     for packet in input_container.demux(streams):
         if packet.pts is not None:
             if end_time is not None and packet.stream.type == "video" and end_time < packet.pts * packet.time_base:
                 break
         if packet.stream.type == "video":
+            if cuvid_dec_test is True:
+                try:
+                    ctx.decode(packet)
+                except:
+                    ctx = video_input_stream.codec_context
+                finally:
+                    cuvid_dec_test=False
             for frame in ctx.decode(packet):
                 frame = fps_filter.update(frame)
                 if frame is not None:
