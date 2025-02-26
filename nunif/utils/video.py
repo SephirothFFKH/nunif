@@ -748,8 +748,14 @@ def process_video(input_path, output_path,
 
     ctx = video_input_stream.codec_context
     cuvid_dec_test=False
+
     if((video_input_stream.codec.name+'_cuvid') in av.codec.codecs_available):
         ctx = av.Codec((video_input_stream.codec.name+'_cuvid'), 'r').create()
+        ctx.extradata = video_input_stream.codec_context.extradata
+        video_input_stream.thread_type = "AUTO"
+        cuvid_dec_test=True
+    if(video_input_stream.codec.name == 'libdav1d' and 'av1_cuvid' in av.codec.codecs_available):
+        ctx = av.Codec(('av1_cuvid'), 'r').create()
         ctx.extradata = video_input_stream.codec_context.extradata
         video_input_stream.thread_type = "AUTO"
         cuvid_dec_test=True
