@@ -8,17 +8,17 @@ LEVEL_ALL = ["auto"] + sorted(list(set(LEVEL_LIBX264) | set(LEVEL_LIBX265)), key
 
 TUNE_LIBX264 = ["film", "animation", "grain", "stillimage", "psnr"]
 TUNE_LIBX265 = ["grain", "animation", "psnr", "fastdecode", "zerolatency"]
-TUNE_NVENC = ["hq", "ll", "ull"]
+TUNE_NVENC = ["uhq", "hq", "ll", "ull"]
 TUNE_ALL = [""] + sorted(list(set(TUNE_LIBX264) | set(TUNE_LIBX265)))
 
 PRESET_LIBX264 = ["ultrafast", "superfast", "veryfast", "faster", "fast",
                   "medium", "slow", "slower", "veryslow", "placebo"]
-PRESET_NVENC = ["fast", "medium", "slow"]
+PRESET_NVENC = ["fast", "medium", "slow", "p1", "p2", "p3", "p4", "p5", "p6", "p7"]
 PRESET_ALL = PRESET_LIBX264
 
 CODEC_ALL = ["libx264", "libopenh264", "libx265", "h264_nvenc", "hevc_nvenc", "utvideo"]
 
-PIX_FMT_ALL = ["yuv420p", "yuv444p", "rgb24"]
+PIX_FMT_ALL = ["yuv420p", "yuv444p", "rgb24", "p016le"]
 PIX_FMT_OPEN_H264 = ["yuv420p"]
 
 

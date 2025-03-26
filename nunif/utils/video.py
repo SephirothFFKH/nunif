@@ -679,10 +679,10 @@ def process_video(input_path, output_path,
     video_input_stream = input_container.streams.video[0]
     video_input_stream.thread_type = "AUTO"
     # _print_len(video_input_stream)
-    audio_input_stream = audio_output_stream = None
-    if len(input_container.streams.audio) > 0:
-        # has audio stream
-        audio_input_stream = input_container.streams.audio[0]
+
+    # has audio stream
+    audio_input_streams = [s for s in input_container.streams.audio]
+    subtitle_input_streams = [s for s in input_container.streams.subtitles]
 
     config = config_callback(video_input_stream)
     config.fps = convert_known_fps(config.fps)
@@ -714,11 +714,15 @@ def process_video(input_path, output_path,
     video_output_stream.options = config.options
     rgb24_options = config.state["rgb24_options"]
     reformatter = config.state["reformatter"]
+    if video_input_stream.metadata is not None:
+        for key, value in video_input_stream.metadata.items():
+            video_output_stream.metadata[key] = value
 
     # utvideo + flac crashes on windows media player
     # default_acodec = "flac" if config.container_format == "avi" else "aac"
     default_acodec = "aac"
-    if audio_input_stream is not None:
+    audio_output_streams = []
+    for audio_input_stream in audio_input_streams:
         if audio_input_stream.rate < 16000:
             audio_output_stream = output_container.add_stream(default_acodec, 16000)
             audio_copy = False
@@ -732,6 +736,19 @@ def process_video(input_path, output_path,
             except ValueError:
                 audio_output_stream = output_container.add_stream(default_acodec, audio_input_stream.rate)
                 audio_copy = False
+        if audio_input_stream.metadata is not None:
+            for key, value in audio_input_stream.metadata.items():
+                audio_output_stream.metadata[key] = value
+        audio_output_streams.append((audio_input_stream, audio_output_stream, audio_copy))
+
+    subtitle_output_streams = []
+    for subtitle_input_stream in subtitle_input_streams:
+        subtitle_output_stream = output_container.add_stream(template=subtitle_input_stream)
+        if subtitle_input_stream.metadata is not None:
+            for key, value in subtitle_input_stream.metadata.items():
+                subtitle_output_stream.metadata[key] = value
+        subtitle_output_streams.append((subtitle_input_stream, subtitle_output_stream))
+
 
     desc = (title if title else input_path)
     ncols = len(desc) + 60
@@ -740,34 +757,65 @@ def process_video(input_path, output_path,
     total = guess_frames(video_input_stream, output_fps, start_time=start_time, end_time=end_time,
                          container_duration=container_duration)
     pbar = tqdm_fn(desc=desc, total=total, ncols=ncols)
-    streams = [s for s in [video_input_stream, audio_input_stream] if s is not None]
+    streams = [video_input_stream] + [s[0] for s in audio_output_streams] + [s[0] for s in subtitle_output_streams]
+
+    ctx = video_input_stream.codec_context
+    cuvid_dec_test=False
+
+    if((video_input_stream.codec.name+'_cuvid') in av.codec.codecs_available):
+        ctx = av.Codec((video_input_stream.codec.name+'_cuvid'), 'r').create()
+        ctx.extradata = video_input_stream.codec_context.extradata
+        video_input_stream.thread_type = "AUTO"
+        cuvid_dec_test=True
+    if(video_input_stream.codec.name == 'libdav1d' and 'av1_cuvid' in av.codec.codecs_available):
+        ctx = av.Codec(('av1_cuvid'), 'r').create()
+        ctx.extradata = video_input_stream.codec_context.extradata
+        video_input_stream.thread_type = "AUTO"
+        cuvid_dec_test=True
 
     for packet in input_container.demux(streams):
         if packet.pts is not None:
             if end_time is not None and packet.stream.type == "video" and end_time < packet.pts * packet.time_base:
                 break
         if packet.stream.type == "video":
-            for frame in packet.decode():
+            if cuvid_dec_test is True:
+                try:
+                    ctx.decode(packet)
+                except:
+                    ctx = video_input_stream.codec_context
+                finally:
+                    cuvid_dec_test=False
+            for frame in ctx.decode(packet):
                 frame = fps_filter.update(frame)
                 if frame is not None:
                     frame = frame.reformat(format="rgb24", **rgb24_options) if rgb24_options else frame
                     for new_frame in get_new_frames(frame_callback(frame)):
                         new_frame = reformatter(new_frame)
+                        # Copy side data from input frame to output frame
+                        for side_data in frame.side_data:
+                            new_frame.side_data.append(side_data)
                         enc_packet = video_output_stream.encode(new_frame)
                         if enc_packet:
                             output_container.mux(enc_packet)
                         pbar.update(1)
         elif packet.stream.type == "audio":
-            if packet.dts is not None:
-                if audio_copy:
-                    packet.stream = audio_output_stream
+            for audio_input_stream, audio_output_stream, audio_copy in audio_output_streams:
+                if packet.stream == audio_input_stream:
+                    if packet.dts is not None:
+                        if audio_copy:
+                            packet.stream = audio_output_stream
+                            output_container.mux(packet)
+                        else:
+                            for frame in packet.decode():
+                                frame.pts = None
+                                enc_packet = audio_output_stream.encode(frame)
+                                if enc_packet:
+                                    output_container.mux(enc_packet)
+        elif packet.stream.type == "subtitle":
+            for subtitle_input_stream, subtitle_output_stream in subtitle_output_streams:
+                if packet.stream == subtitle_input_stream:
+                    packet.stream = subtitle_output_stream
                     output_container.mux(packet)
-                else:
-                    for frame in packet.decode():
-                        frame.pts = None
-                        enc_packet = audio_output_stream.encode(frame)
-                        if enc_packet:
-                            output_container.mux(enc_packet)
         if suspend_event is not None:
             suspend_event.wait()
         if stop_event is not None and stop_event.is_set():

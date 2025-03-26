@@ -377,8 +377,15 @@ def make_video_codec_option(args):
             if args.half_sbs:
                 options["x264-params"] = "frame-packing=3"
         elif args.video_codec in {"hevc_nvenc", "h264_nvenc"}:
+            if args.profile_level:
+                options["level"] = args.profile_level
             options["rc"] = "constqp"
             options["qp"] = str(args.crf)
+            if args.pix_fmt == "p016le":
+                options["profile"] = "main10"
+                options["tier"] = "high"
+                options["highbitdepth"] = "1"
+                options["split_encode_mode"] = "1"
     elif args.video_codec == "libopenh264":
         # NOTE: It seems libopenh264 does not support most options.
         options = {"b": args.video_bitrate}
