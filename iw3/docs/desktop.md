@@ -1,8 +1,11 @@
 # iw3 dekstop streaming
 
-(Warning: This is a very experimental tool)
+[日本語の説明](desktop_ja.md)
 
-`iw3.desktop` is a tool that converts your PC desktop screen into 3D and streaming via WiFi.
+(Warning: This is a very experimental tool.
+Currently, it is known to work with MetaQuest and PICO 4, but not with VisionPro.)
+
+`iw3.desktop` is a tool that converts your PC desktop screen into 3D in realtime and streaming over WiFi.
 It can be viewed as side-by-side 3D from the browser on Meta Quest.
 
 You can watch any image and video displayed on your PC in realtime.
@@ -37,6 +40,17 @@ Estimated FPS = 30.24, Streaming FPS = 0.00
 ```
 (`192.168.11.6` address depends on your network environment)
 
+
+(New) You can also launch GUI with the following command.
+
+```
+python -m iw3.desktop.gui
+```
+
+![iw3-desktop-gui](https://github.com/user-attachments/assets/1cd86b35-d258-45f2-8446-f0f0a4387b1c)
+
+(If you are using nunif-windows-package on Windows, run `iw3-desktop-gui.bat`. If it does not exist, run `update-installer.bat` and `update.bat`.)
+
 If a Firewall dialog appears, allow it.
 
 Open the URL in your PC browser and check if the video can be played.
@@ -58,8 +72,8 @@ You can playback the video in 3D on Meta Quest by following the steps.
 2. Enter the server URL
 3. (Optional) Add URL to favorites
 4. Play the video
-5. Make the **video** full screen using the icon in the bottom right corner of the video.
-6. Make **Browser** full screen using the icon in the top right corner of Browser.
+5. Make **Browser** full screen using the icon in the top right corner of Browser.
+6. Make the **video** full screen using the icon in the bottom right corner of the video.
 7. Set to `Display Mode > 3D Side-by-Side` using the screen icon in the menu at the bottom of Browser
 8. (Optional) Set to Curve Window
 
@@ -68,6 +82,58 @@ Note that `Display Mode` cannot be changed unless both the video and Browser are
 After that, you can use the PC keyboard and mouse to operate the displayed screen.
 
 ## Options
+
+### For PICO 4
+
+According to user reports, PICO 4's browser displays videos in Full SBS mode.
+
+You can change the streaming video to Full SBS with `--full-sbs` option.
+
+```
+python -m iw3.desktop --full-sbs
+```
+
+Half SBS by default. Meta Quest's browser only supports Half SBS.
+
+### Resolution (video resolution)
+
+You can specify the height of the screen with `--stream-height` option. 1080px by default.
+
+```
+python -m iw3.desktop --stream-height 720
+```
+
+### FPS
+
+You can specify the streaming FPS with `--stream-fps` option. 30 FPS by default.
+
+```
+python -m iw3.desktop --stream-fps 15
+```
+
+If `Estimated FPS` is significantly lower than the specified FPS, the PC performance is not sufficient to process the specified FPS.
+
+FPS will be much lower than the video conversion due to `--batch-size 1` processing.
+
+Also, probably due to browser limitations, higher than `Streaming FPS = 30` is not achievable.
+
+### MJPEG Setting
+
+You can specify the JPEG quality with `--stream-quality` option (0-100).
+```
+python -m iw3.desktop --stream-quality 80
+```
+90 by default. When specifying a low value, network traffic is reduced.
+
+### Stereo setting
+
+You can specify the same options as in GUI/CLI.
+
+```
+python -m iw3.desktop --depth-model ZoeD_Any_N --divergence 2 --convergence 0.5 --resolution 518
+```
+
+`--depth-model Any_V2_S --divergence 1 --convergence 1` by default.
 
 ### Network
 
@@ -92,35 +158,3 @@ python -m iw3.desktop --password iw3
 ```
 python -m iw3.desktop --user admin --password 1234
 ```
-
-### Resolution (video resolution)
-
-You can specify the height of the screen with `--stream-height` option. 1080px by default.
-
-```
-python -m iw3.desktop --stream-height 720
-```
-
-### FPS
-
-You can specify the streaming FPS with `--stream-fps` option. 15 FPS by default.
-
-```
-python -m iw3.desktop --stream-fps 30
-```
-
-If `Estimated FPS` is significantly lower than the specified FPS, the PC performance is not sufficient to process the specified FPS.
-
-FPS will be much lower than the video conversion due to `--batch-size 1` processing.
-
-Also, probably due to browser limitations, higher than `Streaming FPS = 30` is not achievable.
-
-### Stereo setting
-
-You can specify the same options as in GUI/CLI.
-
-```
-python -m iw3.desktop --depth-model ZoeD_Any_N --divergence 2 --convergence 0.5 --resolution 518
-```
-
-`--depth-model Any_V2_S --divergence 1 --convergence 1` by default.

@@ -1,5 +1,6 @@
 import wx
 from wx.lib.masked.timectrl import TimeCtrl as _TimeCtrl
+from wx.lib.masked.ipaddrctrl import IpAddrCtrl as _IpAddrCtrl
 import wx.lib.agw.persist as persist
 from os import path
 import sys
@@ -50,6 +51,14 @@ class FileDropCallback(wx.FileDropTarget):
 class TimeCtrl(_TimeCtrl):
     def __init__(self, parent, **kwargs):
         super(TimeCtrl, self).__init__(parent, **kwargs)
+        if sys.platform != "win32":
+            self.Unbind(wx.EVT_CHAR)
+            self.Bind(wx.EVT_CHAR_HOOK, self._OnChar)
+
+
+class IpAddrCtrl(_IpAddrCtrl):
+    def __init__(self, parent, **kwargs):
+        super(IpAddrCtrl, self).__init__(parent, **kwargs)
         if sys.platform != "win32":
             self.Unbind(wx.EVT_CHAR)
             self.Bind(wx.EVT_CHAR_HOOK, self._OnChar)
@@ -173,7 +182,9 @@ def set_icon_ex(main_frame, icon_path, app_id):
 
 
 def start_file(file_path):
-    if not path.exists(file_path):
+    if file_path.startswith("http://") or file_path.startswith("https://"):
+        pass
+    elif not path.exists(file_path):
         return
 
     fd = subprocess.DEVNULL

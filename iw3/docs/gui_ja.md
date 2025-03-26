@@ -1,6 +1,6 @@
 # iw3-gui
 
-iw3-guiは実写のあらゆる画像・動画を3D画像・3D動画に変換するソフトウェアです。
+iw3-guiはあらゆる画像・動画を3D画像・3D動画に変換するソフトウェアです。
 VRで本当に見たかった画像・動画をVRデバイスで3Dメディアとして見れるようになります。
 
 インストールについては[nunif windows package](../../windows_package/docs/README_ja.md)を参照してください。
@@ -14,6 +14,10 @@ VRで本当に見たかった画像・動画をVRデバイスで3Dメディア�
 
 - 入力画像（動画フレーム）から深度(各ピクセルの奥行き)を推定します
 - 入力画像と推定した深度からステレオ画像(左右それぞれの目に映す画像)を生成します
+
+深度推定には以下の事前学習済みモデルが使用できます。
+
+[ZeoDepth](https://github.com/isl-org/ZoeDepth) or [Depth-Anything](https://github.com/LiheYoung/Depth-Anything) or [Depth-Anything-V2](https://github.com/DepthAnything/Depth-Anything-V2) or [Depth Pro](https://github.com/apple/ml-depth-pro) or [Distill Any Depth](https://github.com/Westlake-AGI-Lab/Distill-Any-Depth).
 
 ## 入力
 
@@ -148,6 +152,12 @@ Exportした深度画像を別のソフトウェアで処理するときにフ�
 | `Any_V2_K_S`| Depth-Anything-V2 Metric Depth model VKITTI small. Tuned for outdoor scenes (dashboard camera view).
 | `Any_V2_K_B`| Depth-Anything-V2 Metric Depth model VKITTI base. Tuned for outdoor scenes (dashboard camera view).
 | `Any_V2_K_L`| Depth-Anything-V2 Metric Depth model VKITTI large. Tuned for outdoor scenes (dashboard camera view). (cc-by-nc-4.0)
+| `DepthPro`  | Depth Pro model. 1536x1536 resolution. For image use.
+| `DepthPro_S`  | Depth Pro model. 1024x1024 modified resolution. For image use.
+| `Distill_Any_S`  | Distill Any Depth model small.
+| `Distill_Any_B`  | Distill Any Depth model base.
+| `Distill_Any_L`  | Distill Any Depth model large.
+
 
 通常は`ZoeD_N`か`Any_B`,または`ZoeD_Any_N`を選択してください。
 
@@ -180,6 +190,21 @@ DepthAnythingのほうが精度が高いですが、ステレオ生成の結果�
 
 これらのファイルは https://huggingface.co/depth-anything のModelsセクションからダウンロードできます。開いたページの`Files and versions`タブにあります。
 ファイルが存在する場合のみGUI上に表示されます。
+
+### `Distill_Any_B`, `Distill_Any_L` について
+
+これらのモデルはApache License 2.0とされていますが、cc-by-nc-4.0(非商用)であるDepth-Anythin V2を初期重みとして使用しています。
+
+使用したい場合は、自分でファイルを配置してください。
+
+| Short Name | ファイル |
+|------------|------|
+| `Distill_Any_B` | `iw3/pretrained_models/hub/checkpoints/distill_any_depth_vitb.safetensors`
+| `Distill_Any_L` | `iw3/pretrained_models/hub/checkpoints/distill_any_depth_vitl.safetensors`
+
+これらのファイルは https://github.com/Westlake-AGI-Lab/Distill-Any-Depth のPre-trained Modelセクションからダウンロードできます。
+
+これらのファイルは`.safetensors`形式です。`.pth`への変換は必要ありませんが、上記のファイル名にリネームする必要があります。
 
 ### 深度解像度
 
@@ -223,6 +248,8 @@ DepthAnythingの出力は精度が高いですが、ステレオ生成におい�
 `Full TB`,`Half TB`はトップ・ボトムです。3DTV(Polarized/Passive 3D system)では、トップ・ボトムのほうがサイド・バイ・サイドよりも高い解像度で再生できることがあります。
 
 `VR90`は、正面90°のみを描画したVR180フォーマット(Equirectangular)です。再生時の操作が制限されるので通常はオススメしません。使用しているVR機器や投稿サイト等の都合で使いたい場合に指定してください。Youtubeのメタデータ設定は https://github.com/nagadomi/nunif/issues/268 を見てください。
+
+`Cross Eyed`は交差法用のSBSです。専用デバイスがなくても寄り目で画像を重ねると立体に見えます。通常のSBSと左右の画像が逆になっています。
 
 `Anaglyph *`は、Red-Cyan Anaglyph 3D formatです。
 
@@ -274,6 +301,8 @@ DepthAnythingの出力は精度が高いですが、ステレオ生成におい�
 `libx265`はH.265用です。通常はH.264よりもファイルサイズが小さくなります。ただし古い機器では対応していないことがあります。
 
 `utvideo`はロスレス動画コーデックです。再生には[Ut Video Codec Suite](https://github.com/umezawatakeshi/utvideo/releases)のインストールが必要かもしれません。
+
+`h264_nvenc`, `hevc_nvenc`(H.265)は、NVIDIAのハードウェアエンコーダーです。
 
 ffmpegが対応しているコーデックを直接指定することもできますが、追加のオプションが指定できないのでうまく使えないかもしれません。
 
@@ -509,3 +538,11 @@ GPUのメモリ不足です。`深度バッチサイズ`を小さくするか`�
 作者はこのソフトウェアをRTX 3070 Ti(8GB VRAM, Linux)とGTX 1050 Ti(4GB VRAM, ノートPC, Windows)で動作確認していますが、どちらもデフォルトの設定で動作しています。
 
 ちなみに上記の環境では、RTX 3070 TiのマシンがGTX 1050 Tiのマシンの10倍速いので、もしこのソフトウェアを気に入って古いGPUを使っている場合はRTX 3070 Ti以上の購入をオススメします。10時間かかる動画変換処理が1時間で終わるかもしれません。（OSや本体の違いもあるので言い切ることはできません）
+
+### NVENC(`h264_nvenc` `hevc_nvenc`)が動作しない
+
+NVIDIA Driver 570 以降をインストールしてください。
+
+## サブプロジェクト
+
+[iw3-desktop](desktop_ja.md) はPCのデスクトップ画面を3D変換してWiFi経由でストリーミング配信するツールです。

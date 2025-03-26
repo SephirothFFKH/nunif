@@ -17,7 +17,7 @@ STATUS_OK = "200 OK"
 
 
 class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
-    pass
+    allow_reuse_address = True
 
 
 class StreamingServer():
@@ -46,7 +46,7 @@ class StreamingServer():
         self.thread = None
         self.process_token = None
         self.shutdown_event = threading.Event()
-        self.fps_counter = deque(maxlen=300)
+        self.fps_counter = deque(maxlen=120)
 
         if auth is not None:
             user, password = auth
@@ -56,17 +56,21 @@ class StreamingServer():
 
     def _stop(self):
         self.shutdown_event.set()
+        time.sleep(0.1)
         if self.server is not None:
             self.server.shutdown()
-            self.thread.join()
-            self.server.shutdown()
-            self.thread = None
             self.server = None
-        self.shutdown_event.clear()
+        if self.thread is not None:
+            if self.thread.ident is not None:
+                self.thread.join()
+            self.thread = None
         time.sleep(0.1)
+        self.shutdown_event.clear()
 
     def _start(self):
         self.server = make_server(self.host, self.port, self.handle, ThreadingWSGIServer)
+        # FIXME: sometimes `Address already in use` error occurs
+        self.allow_reuse_address = True
         self.thread = threading.Thread(target=self.server.serve_forever)
         self.thread.start()
         self.process_token = "%016x" % random.getrandbits(64)
@@ -123,7 +127,7 @@ class StreamingServer():
             generator_id = random.getrandbits(64)
             data_tick = 0
             frame = None
-            send_at = time.time()
+            send_at = time.perf_counter()
             bio = io.BytesIO()
             bio.write(b'--frame\r\n' + f"Content-Type: {self.stream_content_type}".encode() + b'\r\n\r\n')
             pos = bio.tell()
@@ -135,7 +139,7 @@ class StreamingServer():
                         if tick > data_tick:
                             data_tick = tick
                             with self.op_lock:
-                                self.fps_counter.append((generator_id, time.time()))
+                                self.fps_counter.append((generator_id, time.perf_counter()))
                             bio.seek(pos, io.SEEK_SET)
                             bio.truncate(pos)
                             bio.write(frame)
@@ -143,16 +147,18 @@ class StreamingServer():
                     if self.shutdown_event.is_set():
                         break
                     if False:  # True if needed
-                        now = time.time()
+                        now = time.perf_counter()
                         if now - send_at < self.delay:
                             time.sleep(self.delay - (now - send_at))
                         send_at = now
                     else:
                         # busy waiting
                         time.sleep(1 / 1000)
+                except GeneratorExit:
+                    raise
                 except:  # noqa
                     print("StreamingServer", sys.exc_info(), file=sys.stderr)
-                    break
+                    raise
             yield b""
 
         start_response(

@@ -39,6 +39,13 @@ ROW_FLOW_V3_SYM_URL = "https://github.com/nagadomi/nunif/releases/download/0.0.0
 IMAGE_IO_QUEUE_MAX = 100
 
 
+def to_pil_image(x):
+    # x is already clipped to 0-1
+    assert x.dtype in {torch.float32, torch.float16}
+    x = TF.to_pil_image((x * 255).round_().to(torch.uint8).cpu())
+    return x
+
+
 def make_divergence_feature_value(divergence, convergence, image_width):
     # assert image_width <= 2048
     divergence_pix = divergence * 0.5 * 0.01 * image_width
@@ -49,12 +56,27 @@ def make_divergence_feature_value(divergence, convergence, image_width):
 
 
 def make_input_tensor(c, depth, divergence, convergence,
-                      image_width, mapper="pow2"):
+                      image_width, mapper="pow2", preserve_screen_border=False):
     depth = depth.squeeze(0)  # CHW -> HW
     depth = get_mapper(mapper)(depth)
     divergence_value, convergence_value = make_divergence_feature_value(divergence, convergence, image_width)
     divergence_feat = torch.full_like(depth, divergence_value, device=depth.device)
     convergence_feat = torch.full_like(depth, convergence_value, device=depth.device)
+
+    if preserve_screen_border:
+        # Force set screen border parallax to zero.
+        # Note that this does not work with tiled rendering (training code)
+        border_pix = round(divergence * 0.75 * 0.01 * image_width * (depth.shape[-1] / image_width))
+        border_weight_l = torch.linspace(0.0, 1.0, border_pix, device=depth.device)
+        border_weight_r = torch.linspace(1.0, 0.0, border_pix, device=depth.device)
+        divergence_feat[:, :border_pix] = (border_weight_l[None, :].expand_as(divergence_feat[:, :border_pix]) *
+                                           divergence_feat[:, :border_pix])
+        divergence_feat[:, -border_pix:] = (border_weight_r[None, :].expand_as(divergence_feat[:, -border_pix:]) *
+                                            divergence_feat[:, -border_pix:])
+        convergence_feat[:, :border_pix] = (border_weight_l[None, :].expand_as(convergence_feat[:, :border_pix]) *
+                                            convergence_feat[:, :border_pix])
+        convergence_feat[:, -border_pix:] = (border_weight_r[None, :].expand_as(convergence_feat[:, -border_pix:]) *
+                                             convergence_feat[:, -border_pix:])
 
     if c is not None:
         w, h = c.shape[2], c.shape[1]
@@ -168,7 +190,7 @@ def apply_divergence_grid_sample(c, depth, divergence, convergence, synthetic_vi
 
 
 def apply_divergence_nn_LR(model, c, depth, divergence, convergence,
-                           mapper, synthetic_view, enable_amp):
+                           mapper, synthetic_view, preserve_screen_border, enable_amp):
     assert synthetic_view in {"both", "right", "left"}
     if getattr(model, "symmetric", False):
         left_eye, right_eye = apply_divergence_nn_symmetric(
@@ -177,23 +199,31 @@ def apply_divergence_nn_LR(model, c, depth, divergence, convergence,
     else:
         if synthetic_view == "both":
             left_eye = apply_divergence_nn(model, c, depth, divergence, convergence,
-                                           mapper, -1, enable_amp)
+                                           mapper=mapper, shift=-1,
+                                           preserve_screen_border=preserve_screen_border,
+                                           enable_amp=enable_amp)
             right_eye = apply_divergence_nn(model, c, depth, divergence, convergence,
-                                            mapper, 1, enable_amp)
+                                            mapper=mapper, shift=1,
+                                            preserve_screen_border=preserve_screen_border,
+                                            enable_amp=enable_amp)
         elif synthetic_view == "right":
             left_eye = c
             right_eye = apply_divergence_nn(model, c, depth, divergence * 2, convergence,
-                                            mapper, 1, enable_amp)
+                                            mapper=mapper, shift=1,
+                                            preserve_screen_border=preserve_screen_border,
+                                            enable_amp=enable_amp)
         elif synthetic_view == "left":
             left_eye = apply_divergence_nn(model, c, depth, divergence * 2, convergence,
-                                           mapper, -1, enable_amp)
+                                           mapper=mapper, shift=-1,
+                                           preserve_screen_border=preserve_screen_border,
+                                           enable_amp=enable_amp)
             right_eye = c
 
     return left_eye, right_eye
 
 
 def apply_divergence_nn(model, c, depth, divergence, convergence,
-                        mapper, shift, enable_amp):
+                        mapper, shift, preserve_screen_border, enable_amp):
     # BCHW
     assert model.delta_output
     if shift > 0:
@@ -205,7 +235,8 @@ def apply_divergence_nn(model, c, depth, divergence, convergence,
                                        divergence=divergence,
                                        convergence=convergence,
                                        image_width=W,
-                                       mapper=mapper)
+                                       mapper=mapper,
+                                       preserve_screen_border=preserve_screen_border)
                      for i in range(depth.shape[0])])
     with autocast(device=depth.device, enabled=enable_amp):
         delta = model(x)
@@ -405,7 +436,7 @@ def remove_bg_from_image(im, bg_session):
     bg_color = torch.tensor((0.4, 0.4, 0.2)).view(3, 1, 1)
     im = im * mask + bg_color * (1.0 - mask)
     im = torch.clamp(im, 0, 1)
-    im = TF.to_pil_image(im)
+    im = to_pil_image(im)
 
     return im
 
@@ -433,7 +464,7 @@ def preprocess_image(im, args):
         im = torch.clamp(im, 0, 1)
     im_org = im
     if args.bg_session is not None:
-        im2 = remove_bg_from_image(TF.to_pil_image(im), args.bg_session)
+        im2 = remove_bg_from_image(to_pil_image(im), args.bg_session)
         im = TF.to_tensor(im2).to(im.device)
     return im_org, im
 
@@ -478,6 +509,7 @@ def apply_divergence(depth, im_org, args, side_model):
             args.divergence, args.convergence,
             mapper=args.mapper,
             synthetic_view=args.synthetic_view,
+            preserve_screen_border=args.preserve_screen_border,
             enable_amp=not args.disable_amp)
 
     if not batch:
@@ -555,8 +587,8 @@ def debug_depth_image(depth, args):
     mean_depth, std_depth = depth.mean().item(), depth.std().item()
     depth2 = get_mapper(args.mapper)(depth)
     out = torch.cat([depth, depth2], dim=2).cpu()
-    out = TF.to_pil_image(out)
-    gc = ImageDraw.Draw(out)
+    out = to_pil_image(out)
+    # gc = ImageDraw.Draw(out)
     # gc.text((16, 16), (f"min={round(float(depth_min), 4)}\n"
     #                    f"max={round(float(depth_max), 4)}\n"
     #                    f"mean={round(float(mean_depth), 4)}\n"
@@ -576,7 +608,7 @@ def process_image(im, args, depth_model, side_model, return_tensor=False):
             left_eye, right_eye = apply_divergence(depth, im_org, args, side_model)
             sbs = postprocess_image(left_eye, right_eye, args)
             if not return_tensor:
-                sbs = TF.to_pil_image(sbs)
+                sbs = to_pil_image(sbs)
             return sbs
         else:
             return debug_depth_image(depth, args)
@@ -1088,7 +1120,7 @@ def export_video(input_filename, output_dir, args, title=None):
             seq = str(seq).zfill(8)
             depth_model.save_depth(depth[0], path.join(depth_dir, f"{seq}.png"), normalize=False)
             if not args.export_depth_only:
-                rgb = TF.to_pil_image(x)
+                rgb = to_pil_image(x)
                 save_image(rgb, path.join(rgb_dir, f"{seq}.png"))
 
     def _batch_callback(x, pts):
@@ -1329,7 +1361,7 @@ def process_config_images(config, args, side_model):
 
                 left_eye, right_eye = apply_divergence(depth, rgb, args, side_model)
                 sbs = postprocess_image(left_eye, right_eye, args)
-                sbs = TF.to_pil_image(sbs)
+                sbs = to_pil_image(sbs)
 
                 output_filename = path.join(
                     output_dir,
@@ -1388,6 +1420,8 @@ def create_parser(required_true=True):
                         help=("the side that generates synthetic view."
                               "when `right`, the left view will be the original input image/frame"
                               " and only the right will be synthesized."))
+    parser.add_argument("--preserve-screen-border", action="store_true",
+                        help=("force set screen border parallax to zero"))
     parser.add_argument("--divergence", "-d", type=float, default=2.0,
                         help=("strength of 3D effect. 0-2 is reasonable value"))
     parser.add_argument("--convergence", "-c", type=float, default=0.5,
@@ -1426,6 +1460,7 @@ def create_parser(required_true=True):
                                  "Any_V2_N", "Any_V2_K",
                                  "Any_V2_N_S", "Any_V2_N_B", "Any_V2_N_L",
                                  "Any_V2_K_S", "Any_V2_K_B", "Any_V2_K_L",
+                                 "Distill_Any_S", "Distill_Any_B", "Distill_Any_L",
                                  "DepthPro", "DepthPro_S",
                                  "NULL",
                                  ],
@@ -1670,6 +1705,25 @@ def is_yaml(filename):
     return path.splitext(filename)[-1].lower() in {".yaml", ".yml"}
 
 
+def load_sbs_model(args):
+    with TorchHubDir(HUB_MODEL_DIR):
+        if args.method in {"row_flow_v3", "row_flow"}:
+            side_model = load_model(ROW_FLOW_V3_URL, weights_only=True, device_ids=[args.gpu[0]])[0].eval()
+            side_model.symmetric = False
+            side_model.delta_output = True
+        elif args.method in {"row_flow_v3_sym", "row_flow_sym"}:
+            side_model = load_model(ROW_FLOW_V3_SYM_URL, weights_only=True, device_ids=[args.gpu[0]])[0].eval()
+            side_model.symmetric = True
+            side_model.delta_output = True
+        elif args.method == "row_flow_v2":
+            side_model = load_model(ROW_FLOW_V2_URL, weights_only=True, device_ids=[args.gpu[0]])[0].eval()
+            side_model.delta_output = True
+        else:
+            side_model = None
+
+    return side_model
+
+
 def iw3_main(args):
     assert not (args.rotate_left and args.rotate_right)
     assert sum([1 for flag in (args.half_sbs, args.vr180, args.anaglyph, args.tb, args.half_tb, args.cross_eyed) if flag]) < 2
@@ -1727,22 +1781,9 @@ def iw3_main(args):
         export_main(args)
         return args
 
-    with TorchHubDir(HUB_MODEL_DIR):
-        if args.method in {"row_flow_v3", "row_flow"}:
-            side_model = load_model(ROW_FLOW_V3_URL, weights_only=True, device_ids=[args.gpu[0]])[0].eval()
-            side_model.symmetric = False
-            side_model.delta_output = True
-        elif args.method in {"row_flow_v3_sym", "row_flow_sym"}:
-            side_model = load_model(ROW_FLOW_V3_SYM_URL, weights_only=True, device_ids=[args.gpu[0]])[0].eval()
-            side_model.symmetric = True
-            side_model.delta_output = True
-        elif args.method == "row_flow_v2":
-            side_model = load_model(ROW_FLOW_V2_URL, weights_only=True, device_ids=[args.gpu[0]])[0].eval()
-            side_model.delta_output = True
-        else:
-            side_model = None
-        if side_model is not None and len(args.gpu) > 1:
-            side_model = DeviceSwitchInference(side_model, device_ids=args.gpu)
+    side_model = load_sbs_model(args)
+    if side_model is not None and len(args.gpu) > 1:
+        side_model = DeviceSwitchInference(side_model, device_ids=args.gpu)
 
     if args.find_param:
         assert is_image(args.input) and (path.isdir(args.output) or not path.exists(args.output))

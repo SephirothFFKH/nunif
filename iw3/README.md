@@ -10,7 +10,7 @@ This project is under construction.
 
 ## Overview
 
-- Estimating depthmap using [ZeoDepth](https://github.com/isl-org/ZoeDepth) or [Depth-Anything](https://github.com/LiheYoung/Depth-Anything) or [Depth-Anything-V2](https://github.com/DepthAnything/Depth-Anything-V2).
+- Estimating depthmap using [ZeoDepth](https://github.com/isl-org/ZoeDepth) or [Depth-Anything](https://github.com/LiheYoung/Depth-Anything) or [Depth-Anything-V2](https://github.com/DepthAnything/Depth-Anything-V2) or [Depth Pro](https://github.com/apple/ml-depth-pro) or [Distill Any Depth](https://github.com/Westlake-AGI-Lab/Distill-Any-Depth).
 - Generating side-by-side image using grid_sample based lightweight model
 
 ## Usage
@@ -201,6 +201,11 @@ When `--tb` or `--half-tb` option is specified, the video is output in TopBottom
 
 TopBottom format can be played back with higher resolution than SBS on some 3D TVs (Polarized/Passive 3D system).
 
+## Cross Eyed
+
+When `--cross-eyed` option is specified, the video/image is output for cross-eyed viewing method.
+
+Unlike the normal SBS format, the images are reversed left and right.
 
 ## Anaglyph 3D format
 
@@ -301,6 +306,10 @@ Use `--low-vram` option.
 I tested this program on RTX 3070 Ti (8GB VRAM, Linux) and GTX 1050 Ti (4GB VRAM, Laptop, Windows).
 Both work with the default option.
 
+### NVENC(`h264_nvenc`, `hevc_nvenc`) does not work
+
+Install NVIDIA Driver 570 or newer.
+
 ### How to convert rotated(height width swapped) video correctly
 
 Use `--rotate-left`(rotate 90 degrees to counterclockwise) or `--rotate-right`(rotate 90 degrees to clockwise) option to fix the rotation.
@@ -368,11 +377,18 @@ Perhaps what is needed is fine tuning for ZoeDepth.
 | `Any_V2_K_S`| Depth-Anything-V2 Metric Depth model VKITTI small. Tuned for outdoor scenes (dashboard camera view).
 | `Any_V2_K_B`| Depth-Anything-V2 Metric Depth model VKITTI base. Tuned for outdoor scenes (dashboard camera view).
 | `Any_V2_K_L`| Depth-Anything-V2 Metric Depth model VKITTI large. Tuned for outdoor scenes (dashboard camera view). (cc-by-nc-4.0)
+| `DepthPro`  | Depth Pro model. 1536x1536 resolution. For image use.
+| `DepthPro_S`  | Depth Pro model. 1024x1024 modified resolution. For image use.
+| `Distill_Any_S`  | Distill Any Depth model small.
+| `Distill_Any_B`  | Distill Any Depth model base.
+| `Distill_Any_L`  | Distill Any Depth model large.
 
 Personally, I recommend `ZoeD_N`, `Any_B` or `ZoeD_Any_N`.
 `ZoeD_Any_N` looks the best for 3D scene. The DepthAnything models have more accurate foreground and background segmentation, but the foreground looks slightly flat.
 
 For art/anime, DepthAnything is better than ZoeDepth.
+
+Regarding Depth Pro, distance is currently clipped at 40m. It is planned to become adjustable as an option.
 
 ### About `Any_V2_B` ,`Any_V2_L`, `Any_V2_N_L`, `Any_V2_K_L`
 
@@ -388,6 +404,21 @@ If you want to use it, agree to the pre-trained model license and place the chec
 | `Any_V2_K_L` | `iw3/pretrained_models/hub/checkpoints/depth_anything_v2_metric_vkitti_vitl.pth`
 
 These files can be downloaded from Models section of https://huggingface.co/depth-anything .
+
+### About `Distill_Any_B`, `Distill_Any_L`
+
+These models are stated to be under Apache License 2.0, but they use Depth-Anything-V2, which is licensed under cc-by-nc-4.0 (Non Commercial), as the initial weights.
+
+If you want to use it, place the checkpoint file yourself.
+
+| Short Name | Path |
+|------------|------|
+| `Distill_Any_B` | `iw3/pretrained_models/hub/checkpoints/distill_any_depth_vitb.safetensors`
+| `Distill_Any_L` | `iw3/pretrained_models/hub/checkpoints/distill_any_depth_vitl.safetensors`
+
+These files can be downloaded from Pre-trained Models section of https://github.com/Westlake-AGI-Lab/Distill-Any-Depth .
+
+These files are in `.safetensors` format, so conversion to `.pth` is not required. Renaming to an appropriate file name is required.
 
 ## Stereo Generation Method (Left-Right Image Generation)
 
@@ -418,3 +449,7 @@ The command syncs the following repositories.
 - https://github.com/nagadomi/Depth-Anything_iw3
 
 If you already downloaded the model files (checkpoint filess), downloading model files will be skipped.
+
+## Sub Project
+
+[iw3-desktop](docs/desktop.md) is a tool that converts your PC desktop screen into 3D in realtime and streaming over WiFi.

@@ -209,27 +209,8 @@ class MainFrame(wx.Frame):
         self.cbo_stereo_width.SetToolTip(T("Only used for row_flow_v3 and row_flow_v2"))
 
         self.lbl_depth_model = wx.StaticText(self.grp_stereo, label=T("Depth Model"))
-        depth_models = [
-            "ZoeD_N", "ZoeD_K", "ZoeD_NK",
-            "ZoeD_Any_N", "ZoeD_Any_K",
-            "DepthPro", "DepthPro_S",
-            "Any_S", "Any_B", "Any_L",
-            "Any_V2_S",
-        ]
-        if DepthAnythingModel.has_checkpoint_file("Any_V2_B"):
-            depth_models.append("Any_V2_B")
-        if DepthAnythingModel.has_checkpoint_file("Any_V2_L"):
-            depth_models.append("Any_V2_L")
-
-        depth_models += ["Any_V2_N_S", "Any_V2_N_B"]
-        if DepthAnythingModel.has_checkpoint_file("Any_V2_N_L"):
-            depth_models.append("Any_V2_N_L")
-        depth_models += ["Any_V2_K_S", "Any_V2_K_B"]
-        if DepthAnythingModel.has_checkpoint_file("Any_V2_K_L"):
-            depth_models.append("Any_V2_K_L")
-
         self.cbo_depth_model = wx.ComboBox(self.grp_stereo,
-                                           choices=depth_models,
+                                           choices=self.get_depth_models(),
                                            style=wx.CB_READONLY, name="cbo_depth_model")
         self.cbo_depth_model.SetSelection(3)
 
@@ -253,6 +234,21 @@ class MainFrame(wx.Frame):
 
         self.cbo_edge_dilation.SetSelection(2)
         self.cbo_edge_dilation.SetToolTip(T("Reduce distortion of foreground and background edges"))
+
+        self.chk_ema_normalize = wx.CheckBox(self.grp_stereo,
+                                             label=T("Flicker Reduction"),
+                                             name="chk_ema_normalize")
+        self.chk_ema_normalize.SetToolTip(T("Video Only") + " " + T("(experimental)"))
+        self.cbo_ema_decay = EditableComboBox(self.grp_stereo, choices=["0.99", "0.9", "0.75", "0.5"],
+                                              name="cbo_ema_decay")
+        self.cbo_ema_decay.SetSelection(2)
+        self.chk_ema_normalize.SetToolTip(T("Video Only") + " " + T("(experimental)"))
+
+        self.chk_preserve_screen_border = wx.CheckBox(self.grp_stereo,
+                                                      label=T("Preserve Screen Border"),
+                                                      name="chk_preserve_screen_border")
+        self.chk_preserve_screen_border.SetValue(False)
+        self.chk_preserve_screen_border.SetToolTip(T("Force set screen border parallax to zero"))
 
         self.lbl_stereo_format = wx.StaticText(self.grp_stereo, label=T("Stereo Format"))
         self.cbo_stereo_format = wx.ComboBox(
@@ -280,15 +276,6 @@ class MainFrame(wx.Frame):
         self.lbl_anaglyph_method.Hide()
         self.cbo_anaglyph_method.Hide()
 
-        self.chk_ema_normalize = wx.CheckBox(self.grp_stereo,
-                                             label=T("Flicker Reduction"),
-                                             name="chk_ema_normalize")
-        self.chk_ema_normalize.SetToolTip(T("Video Only") + " " + T("(experimental)"))
-        self.cbo_ema_decay = EditableComboBox(self.grp_stereo, choices=["0.99", "0.9", "0.75", "0.5"],
-                                              name="cbo_ema_decay")
-        self.cbo_ema_decay.SetSelection(2)
-        self.chk_ema_normalize.SetToolTip(T("Video Only") + " " + T("(experimental)"))
-
         self.chk_export_depth_only = wx.CheckBox(self.grp_stereo, label=T("Depth Only"), name="chk_export_depth_only")
         self.chk_export_depth_only.SetValue(False)
         self.chk_export_depth_only.SetToolTip(T("Exporting depth images only.\n"
@@ -297,7 +284,8 @@ class MainFrame(wx.Frame):
 
         self.chk_export_depth_fit = wx.CheckBox(self.grp_stereo, label=T("Resize to fit"), name="chk_export_depth_fit")
         self.chk_export_depth_fit.SetValue(False)
-        self.chk_export_depth_fit.SetToolTip(T("Resize depth images to the same size as rgb images."))
+        self.chk_export_depth_fit.SetToolTip(T("Resize depth images to the same size as rgb images.\n"
+                                               "Note that the process may become very slow due to the output file becoming large."))
         self.chk_export_depth_fit.Hide()
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
@@ -327,6 +315,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_edge_dilation, (i, 1), flag=wx.EXPAND)
         layout.Add(self.chk_ema_normalize, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_ema_decay, (i, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_preserve_screen_border, (i := i + 1, 0), (0, 1), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_stereo_format, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_stereo_format, (i, 1), flag=wx.EXPAND)
         layout.Add(self.lbl_anaglyph_method, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -545,7 +534,7 @@ class MainFrame(wx.Frame):
 
         self.cbo_divergence.Bind(wx.EVT_TEXT, self.update_divergence_warning)
         self.cbo_synthetic_view.Bind(wx.EVT_TEXT, self.update_divergence_warning)
-        self.cbo_method.Bind(wx.EVT_TEXT, self.update_divergence_warning)
+        self.cbo_method.Bind(wx.EVT_TEXT, self.on_selected_index_changed_cbo_method)
         self.lbl_divergence_warning.Bind(wx.EVT_LEFT_DOWN, self.on_click_divergence_warning)
 
         self.cbo_depth_model.Bind(wx.EVT_TEXT, self.on_selected_index_changed_cbo_depth_model)
@@ -595,6 +584,34 @@ class MainFrame(wx.Frame):
         self.grp_video.update_controls()
 
         self.update_divergence_warning()
+        self.update_preserve_screen_border()
+
+    def get_depth_models(self):
+        depth_models = [
+            "ZoeD_N", "ZoeD_K", "ZoeD_NK",
+            "ZoeD_Any_N", "ZoeD_Any_K",
+            "DepthPro", "DepthPro_S",
+            "Any_S", "Any_B", "Any_L",
+            "Any_V2_S",
+        ]
+        if DepthAnythingModel.has_checkpoint_file("Any_V2_B"):
+            depth_models.append("Any_V2_B")
+        if DepthAnythingModel.has_checkpoint_file("Any_V2_L"):
+            depth_models.append("Any_V2_L")
+
+        depth_models += ["Any_V2_N_S", "Any_V2_N_B"]
+        if DepthAnythingModel.has_checkpoint_file("Any_V2_N_L"):
+            depth_models.append("Any_V2_N_L")
+        depth_models += ["Any_V2_K_S", "Any_V2_K_B"]
+        if DepthAnythingModel.has_checkpoint_file("Any_V2_K_L"):
+            depth_models.append("Any_V2_K_L")
+
+        depth_models += ["Distill_Any_S"]
+        if DepthAnythingModel.has_checkpoint_file("Distill_Any_B"):
+            depth_models.append("Distill_Any_B")
+        if DepthAnythingModel.has_checkpoint_file("Distill_Any_L"):
+            depth_models.append("Distill_Any_L")
+        return depth_models
 
     def get_editable_comboboxes(self):
         editable_comboboxes = [
@@ -733,6 +750,16 @@ class MainFrame(wx.Frame):
 
     def on_selected_index_changed_cbo_depth_model(self, event):
         self.update_model_selection()
+
+    def update_preserve_screen_border(self):
+        if self.cbo_method.GetValue() in {"row_flow_v2", "row_flow_v3", "row_flow_v3_sym"}:
+            self.chk_preserve_screen_border.Enable()
+        else:
+            self.chk_preserve_screen_border.Disable()
+
+    def on_selected_index_changed_cbo_method(self, event):
+        self.update_divergence_warning()
+        self.update_preserve_screen_border()
 
     def on_selected_index_changed_cbo_stereo_format(self, event):
         self.update_input_option_state()
@@ -911,6 +938,7 @@ class MainFrame(wx.Frame):
         end_time = self.txt_end_time.GetValue() if self.chk_end_time.GetValue() else None
         edge_dilation = int(self.cbo_edge_dilation.GetValue()) if self.chk_edge_dilation.IsChecked() else 0
         metadata = "filename" if self.chk_metadata.GetValue() else None
+        preserve_screen_border = self.chk_preserve_screen_border.IsEnabled() and self.chk_preserve_screen_border.IsChecked()
 
         parser.set_defaults(
             input=input_path,
@@ -922,6 +950,7 @@ class MainFrame(wx.Frame):
             ipd_offset=float(self.sld_ipd_offset.GetValue()),
             synthetic_view=self.cbo_synthetic_view.GetValue(),
             method=self.cbo_method.GetValue(),
+            preserve_screen_border=preserve_screen_border,
             depth_model=depth_model_type,
             foreground_scale=float(self.cbo_foreground_scale.GetValue()),
             edge_dilation=edge_dilation,
