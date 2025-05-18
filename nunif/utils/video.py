@@ -683,7 +683,11 @@ def process_video(input_path, output_path,
     # has audio stream
     audio_input_streams = [s for s in input_container.streams.audio]
     subtitle_input_streams = [s for s in input_container.streams.subtitles]
-
+    """
+    attachments_input_streams = [s for s in input_container.streams.attachments]
+    data_input_streams = [s for s in input_container.streams.data]
+    other_input_streams = [s for s in input_container.streams.other]
+    """
     config = config_callback(video_input_stream)
     config.fps = convert_known_fps(config.fps)
     config.output_fps = convert_known_fps(config.output_fps)
@@ -743,13 +747,36 @@ def process_video(input_path, output_path,
 
     subtitle_output_streams = []
     for subtitle_input_stream in subtitle_input_streams:
-        subtitle_output_stream = output_container.add_stream(template=subtitle_input_stream)
+        subtitle_output_stream = add_stream_from_template(output_container, template=subtitle_input_stream)
         if subtitle_input_stream.metadata is not None:
             for key, value in subtitle_input_stream.metadata.items():
                 subtitle_output_stream.metadata[key] = value
         subtitle_output_streams.append((subtitle_input_stream, subtitle_output_stream))
+    """
+    attachments_output_streams = []
+    for attachments_input_stream in attachments_input_streams:
+        attachments_output_stream = output_container.add_data_stream()
+        if attachments_input_stream.metadata is not None:
+            for key, value in attachments_input_stream.metadata.items():
+                attachments_output_stream.metadata[key] = value
+        attachments_output_streams.append((attachments_input_stream, attachments_output_stream))
+    
+    data_output_streams = []
+    for data_input_stream in data_input_streams:
+        data_output_stream = output_container.add_data_stream()
+        if data_input_stream.metadata is not None:
+            for key, value in data_input_stream.metadata.items():
+                data_output_stream.metadata[key] = value
+        data_output_streams.append((data_input_stream, data_output_stream))
 
-
+    other_output_streams = []
+    for other_input_stream in other_input_streams:
+        other_output_stream = output_container.add_data_stream()
+        if other_input_stream.metadata is not None:
+            for key, value in other_input_stream.metadata.items():
+                other_output_stream.metadata[key] = value
+        other_output_streams.append((other_input_stream, other_output_stream))
+    """
     desc = (title if title else input_path)
     ncols = len(desc) + 60
     tqdm_fn = tqdm_fn or tqdm
@@ -757,7 +784,7 @@ def process_video(input_path, output_path,
     total = guess_frames(video_input_stream, output_fps, start_time=start_time, end_time=end_time,
                          container_duration=container_duration)
     pbar = tqdm_fn(desc=desc, total=total, ncols=ncols)
-    streams = [video_input_stream] + [s[0] for s in audio_output_streams] + [s[0] for s in subtitle_output_streams]
+    streams = [video_input_stream] + [s[0] for s in audio_output_streams] + [s[0] for s in subtitle_output_streams] #+ [s[0] for s in attachments_output_streams] + [s[0] for s in data_output_streams] + [s[0] for s in other_output_streams]
 
     ctx = video_input_stream.codec_context
     cuvid_dec_test=False
@@ -816,6 +843,23 @@ def process_video(input_path, output_path,
                 if packet.stream == subtitle_input_stream:
                     packet.stream = subtitle_output_stream
                     output_container.mux(packet)
+        """
+        elif packet.stream.type == "attachments":
+            for attachments_input_stream, attachments_output_stream in attachments_output_streams:
+                if packet.stream == attachments_input_stream:
+                    packet.stream = attachments_output_stream
+                    output_container.mux(packet)
+        elif packet.stream.type == "data":
+            for data_input_stream, data_output_stream in data_output_streams:
+                if packet.stream == data_input_stream:
+                    packet.stream = data_output_stream
+                    output_container.mux(packet)
+        elif packet.stream.type == "other":
+            for other_input_stream, other_output_stream in other_output_streams:
+                if packet.stream == other_input_stream:
+                    packet.stream = other_output_stream
+                    output_container.mux(packet)
+        """
         if suspend_event is not None:
             suspend_event.wait()
         if stop_event is not None and stop_event.is_set():

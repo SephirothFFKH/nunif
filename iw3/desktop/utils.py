@@ -67,6 +67,8 @@ def is_private_address(ip):
 def to_uint8_cpu(x):
     return x.mul(255).round_().to(torch.uint8).cpu()
 
+def to_uint8_gpu(x):
+    return x.mul(255).round_().to(torch.uint8).to('cuda')
 
 def fps_sleep(start_time, fps, resolution=2e-4):
     # currently not in used
@@ -77,10 +79,10 @@ def fps_sleep(start_time, fps, resolution=2e-4):
 
 def to_jpeg_data(frame, quality, tick):
     bio = io.BytesIO()
-    frame = to_uint8_cpu(frame)
+    frame = to_uint8_gpu(frame)
     # TODO: encode_jpeg has a bug with cuda, but that will be fixed in the next version.
     frame = encode_jpeg(frame, quality=quality)
-    bio.write(frame.numpy())
+    bio.write(frame.cpu().numpy())
     return (bio.getbuffer().tobytes(), tick)
 
 
