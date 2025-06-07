@@ -155,7 +155,6 @@ def set_state_args(args, args_lock=None, stop_event=None, fps_event=None, depth_
     IW3U.set_state_args(args, stop_event=stop_event, depth_model=depth_model)
     args.state["fps_event"] = fps_event
     args.state["args_lock"] = args_lock if args_lock is not None else threading.Lock()
-    args.bg_session = None
     if args.edge_dilation is None:
         args.edge_dilation = 2
 
@@ -163,11 +162,15 @@ def set_state_args(args, args_lock=None, stop_event=None, fps_event=None, depth_
 def iw3_desktop_main(args, init_wxapp=True):
     init_num_threads(args.gpu[0])
 
-    if not args.full_sbs:
-        args.half_sbs = True
+    if args.full_sbs:
+        frame_width_scale = 2
+    elif args.rgbd:
+        frame_width_scale = 2
+    elif args.half_rgbd:
         frame_width_scale = 1
     else:
-        frame_width_scale = 2
+        args.half_sbs = True
+        frame_width_scale = 1
 
     if args.bind_addr is None:
         args.bind_addr = get_local_address()
@@ -191,7 +194,7 @@ def iw3_desktop_main(args, init_wxapp=True):
         depth_model.load(gpu=args.gpu, resolution=args.resolution)
 
     # Use Flicker Reduction to prevent 3D sickness
-    depth_model.enable_ema_minmax(args.ema_decay)
+    depth_model.enable_ema(args.ema_decay, buffer_size=1)
     args.mapper = IW3U.resolve_mapper_name(mapper=args.mapper, foreground_scale=args.foreground_scale,
                                            metric_depth=depth_model.is_metric())
     side_model = IW3U.load_sbs_model(args)
@@ -270,7 +273,7 @@ def iw3_desktop_main(args, init_wxapp=True):
             with args.state["args_lock"]:
                 tick = time.perf_counter()
                 frame = screenshot_thread.get_frame()
-                sbs = IW3U.process_image(frame, args, depth_model, side_model, return_tensor=True)
+                sbs = IW3U.process_image(frame, args, depth_model, side_model)
                 if args.gpu_jpeg:
                     server.set_frame_data(to_jpeg_data(sbs, quality=args.stream_quality, tick=tick, gpu_jpeg=args.gpu_jpeg))
                 else:

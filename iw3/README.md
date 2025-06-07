@@ -10,7 +10,7 @@ This project is under construction.
 
 ## Overview
 
-- Estimating depthmap using [ZeoDepth](https://github.com/isl-org/ZoeDepth) or [Depth-Anything](https://github.com/LiheYoung/Depth-Anything) or [Depth-Anything-V2](https://github.com/DepthAnything/Depth-Anything-V2) or [Depth Pro](https://github.com/apple/ml-depth-pro) or [Distill Any Depth](https://github.com/Westlake-AGI-Lab/Distill-Any-Depth).
+- Estimating depthmap using [ZeoDepth](https://github.com/isl-org/ZoeDepth) or [Depth-Anything](https://github.com/LiheYoung/Depth-Anything) or [Depth-Anything-V2](https://github.com/DepthAnything/Depth-Anything-V2) or [Depth Pro](https://github.com/apple/ml-depth-pro) or [Distill Any Depth](https://github.com/Westlake-AGI-Lab/Distill-Any-Depth) or [Video-Depth-Anything](https://github.com/DepthAnything/Video-Depth-Anything).
 - Generating side-by-side image using grid_sample based lightweight model
 
 ## Usage
@@ -255,10 +255,7 @@ This tends to happen with outdoor scene photos.
 There are several ways to fight this problem.
 
 - Try `--foreground-scale 3` option
-- Try`--remove-bg` option
-- Try combined option `--divergence 4 --convergence 0 --foreground-scale 3 --remove-bg`
-
-When `--remove-bg` is specified, the background area is removed using [rembg](https://github.com/danielgatis/rembg) with [U2-net](https://github.com/xuebinqin/U-2-Net)'s human segmentation model, before estimating depthmap.
+- Try combined option `--divergence 4 --convergence 0 --foreground-scale 3`
 
 ### Video encoding error
 
@@ -385,8 +382,11 @@ Perhaps what is needed is fine tuning for ZoeDepth.
 | `Distill_Any_S`  | Distill Any Depth model small.
 | `Distill_Any_B`  | Distill Any Depth model base.
 | `Distill_Any_L`  | Distill Any Depth model large.
+| `VDA_S`  | Video Depth Anything small.
+| `VDA_L`  | Video Depth Anything large.
+| `VDA_Metric`  | Video Depth Anything metric depth model.
 
-Personally, I recommend `ZoeD_N`, `Any_B` or `ZoeD_Any_N`.
+Personally, I recommend `ZoeD_Any_N`, `Any_B` or `VDA_Metric`.
 `ZoeD_Any_N` looks the best for 3D scene. The DepthAnything models have more accurate foreground and background segmentation, but the foreground looks slightly flat.
 
 For art/anime, DepthAnything is better than ZoeDepth.
@@ -407,6 +407,47 @@ If you want to use it, agree to the pre-trained model license and place the chec
 | `Any_V2_K_L` | `iw3/pretrained_models/hub/checkpoints/depth_anything_v2_metric_vkitti_vitl.pth`
 
 These files can be downloaded from Models section of https://huggingface.co/depth-anything .
+
+- https://huggingface.co/depth-anything/Depth-Anything-V2-Base
+- https://huggingface.co/depth-anything/Depth-Anything-V2-Large
+- https://huggingface.co/depth-anything/Depth-Anything-V2-Metric-Hypersim-Large
+- https://huggingface.co/depth-anything/Depth-Anything-V2-Metric-VKITTI-Large
+
+
+### About Video-Depth-Anything
+
+#### `VDA_L`, `VDA_Metric`
+
+These models are licensed under cc-by-nc-4.0 (Non Commercial).
+If you want to use it, agree to the pre-trained model license and place the checkpoint file yourself.
+
+| Short Name | Path |
+|------------|------|
+| `VDA_L` | `iw3/pretrained_models/hub/checkpoints/video_depth_anything_vitl.pth`
+| `VDA_Metric` | `iw3/pretrained_models/hub/checkpoints/metric_video_depth_anything_vitl.pth`
+
+These files can be downloaded from Models section of https://huggingface.co/depth-anything .
+
+- https://huggingface.co/depth-anything/Video-Depth-Anything-Large
+- https://huggingface.co/depth-anything/Metric-Video-Depth-Anything-Large
+
+#### VDA Implementation Notes
+
+The following options are highly recommended.
+
+- `Scene Boundary Detection` (`--scene-detect`)
+- `Flicker Reduction` (`--ema-normalize`)
+
+The following options are ignored.
+
+- `Low VRAM` (`--low-vram`)
+- `TTA` (`--tta`)
+- `Worker Threads` (`--max-workers`)
+- `Stream` (`--cuda-stream`)
+
+`Batch Size`(`--batch-size`) is also ignored when using the depth model (32 is used), but it is used during preprocessing and stereo generation.
+
+Also, the original implementation uses global min/max values for normalization, but iw3's online processing uses their moving average.
 
 ### About `Distill_Any_B`, `Distill_Any_L`
 
