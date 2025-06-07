@@ -1,5 +1,6 @@
 from packaging import version as packaging_version
 import torch
+import torch_tensorrt
 from datetime import datetime, timezone
 from collections import OrderedDict
 import torch.nn as nn
@@ -106,8 +107,8 @@ def check_compile_support(device):
         try:
             model = torch.nn.Linear(32, 32, bias=False)
             model.weight.data.zero_()
-            model = torch.compile(model.eval().to(device))
-            func = torch.compile(_test_func)
+            model = torch.compile(model.eval().to(device), backend="tensorrt")
+            func = torch.compile(_test_func, backend="tensorrt")
             with torch.inference_mode(), autocast(device):
                 model(torch.zeros((1, 32), device=device))
                 func(torch.zeros((32,), dtype=torch.float32, device=device))
@@ -123,7 +124,8 @@ def check_compile_support(device):
 def compile_model(model, **kwargs):
     if not is_compiled_model(model) and check_compile_support(get_model_device(model)):
         logger.debug(f"compile {model.__class__.__name__}, kwargs={kwargs}")
-        model = torch.compile(model, **kwargs)
+        #model = torch.compile(model)
+        model = torch.compile(model, backend="tensorrt", options={"optimization_level": 5, "tiling_optimization_level": "moderate", "require_full_compilation": True, "use_fast_partitioner": False, "sparse_weights": True, "truncate_double": True, "enable_experimental_decompositions ": True, "min_block_size": 0, "cache_built_engines": True, "reuse_cached_engines": True, "engine_cache_dir": "trt_engine_cache", "engine_cache_size": 10737418240,}, **kwargs)
     return model
 
 

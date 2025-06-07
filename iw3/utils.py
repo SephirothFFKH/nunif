@@ -464,6 +464,9 @@ def remove_bg_from_image(im, bg_session):
 def preprocess_image(im, args):
     if not torch.is_tensor(im):
         im = TF.to_tensor(im)
+    
+    #if im.shape[0] != 3 or im.shape[0] != 4:
+    #    im = im.reshape(im.shape[2], im.shape[0], im.shape[1])
 
     if args.rotate_left:
         im = torch.rot90(im, 1, (1, 2))
