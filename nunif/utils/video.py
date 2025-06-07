@@ -1,5 +1,6 @@
 import av
 from av.video.reformatter import ColorRange, Colorspace
+from numpy import info
 from packaging import version as packaging_version
 import os
 from os import path
@@ -12,6 +13,13 @@ import torch
 from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 import time
+# Add torchaudio import for StreamReader and StreamWriter
+try:
+    import torchaudio
+    from torchaudio.io import StreamReader, StreamWriter
+    HAS_TORCHAUDIO = True
+except ImportError:
+    HAS_TORCHAUDIO = False
 
 
 # Add video mimetypes that does not exist in mimetypes
@@ -155,7 +163,10 @@ def from_image(im):
 
 
 def to_tensor(frame, device=None):
-    x = torch.from_numpy(frame.to_ndarray(format="rgb24"))
+    if not isinstance(frame, torch.Tensor):
+        x = torch.from_numpy(frame.to_ndarray(format="rgb24"))
+    else:
+        x = frame
     if device is not None:
         x = x.to(device)
     # CHW float32
@@ -654,7 +665,14 @@ def process_video(input_path, output_path,
                   vf="",
                   stop_event=None, suspend_event=None, tqdm_fn=None,
                   start_time=None, end_time=None,
-                  test_callback=None):
+                  test_callback=None,
+                  use_torchaudio=False):
+    """
+    Add use_torchaudio option to use torchaudio.io.StreamReader/StreamWriter for decoding/encoding.
+    """
+    if use_torchaudio and not HAS_TORCHAUDIO:
+        raise ImportError("torchaudio is not installed. Please install torchaudio to use this option.")
+
     if isinstance(start_time, str):
         start_time = parse_time(start_time)
     if isinstance(end_time, str):
@@ -663,8 +681,129 @@ def process_video(input_path, output_path,
             raise ValueError("end_time must be greater than start_time")
 
     output_path_tmp = path.join(path.dirname(output_path), "_tmp_" + path.basename(output_path))
-    input_container = av.open(input_path)
 
+    if use_torchaudio:
+        # --- torchaudio code path ---
+        sr = StreamReader(input_path)
+        # Find video and audio streams
+        video_stream_idx = None
+        audio_stream_idx = None
+        for i in range(sr.num_src_streams):
+            info = sr.get_src_stream_info(i)
+            if info.media_type == "video" and video_stream_idx is None:
+                video_stream_idx = i
+            elif info.media_type == "audio" and audio_stream_idx is None:
+                audio_stream_idx = i
+        if video_stream_idx is None:
+            raise ValueError("No video stream")
+        # Add video stream
+        sr.add_video_stream(stream_index=video_stream_idx, frames_per_chunk=1)
+        # Add audio stream if present
+        if audio_stream_idx is not None:
+            sr.add_audio_stream(stream_index=audio_stream_idx, frames_per_chunk=1024)
+        # Get video stream info
+        video_info = sr.get_src_stream_info(video_stream_idx)
+        width = video_info.width
+        height = video_info.height
+        fps = video_info.frame_rate
+        pix_fmt = "rgb24"
+        # Setup config
+        class DummyStream:
+            # Minimal interface for config_callback
+            def __init__(self, width, height, fps):
+                self.codec_context = type("ctx", (), {})()
+                self.codec_context.width = width
+                self.codec_context.height = height
+                self.guessed_rate = fps
+                self.pix_fmt = pix_fmt
+        dummy_stream = DummyStream(width, height, fps)
+        config = config_callback(dummy_stream)
+        config.fps = convert_known_fps(config.fps)
+        config.output_fps = convert_known_fps(config.output_fps)
+        if not config.container_format:
+            config.container_format = path.splitext(output_path)[-1].lower()[1:]
+        output_size = (config.output_width or width, config.output_height or height)
+        if config.output_width is not None and config.output_height is not None:
+            output_size = config.output_width, config.output_height
+        output_fps = config.output_fps or config.fps
+        reformatter = config.state["reformatter"]
+        desc = (title if title else input_path)
+        ncols = len(desc) + 60
+        tqdm_fn = tqdm_fn or tqdm
+        # Estimate total frames
+        total = None
+        try:
+            total = int(float(getattr(video_info, "num_frames", 0)))
+        except Exception:
+            pass
+        pbar = tqdm_fn(desc=desc, total=total, ncols=ncols)
+        # --- StreamWriter for output ---
+        sw = StreamWriter(output_path_tmp)
+        # Add video stream (use default codec for container)
+        sw.add_video_stream(
+            frame_rate=float(output_fps),
+            width=output_size[0],
+            height=output_size[1],
+            format=pix_fmt,
+            encoder_format=None  # use default
+        )
+        # Add audio stream if present
+        if audio_stream_idx is not None:
+            audio_info = sr.get_src_stream_info(audio_stream_idx)
+            sw.add_audio_stream(
+                sample_rate=int(audio_info.sample_rate),
+                num_channels=int(audio_info.num_channels),
+                encoder_format=None  # use default
+            )
+        sw.open()
+        # Iterate over video frames
+        for (video_chunk, audio_chunk) in sr.stream():
+            if video_chunk is not None:
+                # video_chunk: (frames, H, W, C), uint8
+                for frame_nd in video_chunk:
+                    # Convert to torch tensor, then av.VideoFrame
+                    frame = torch.from_numpy(frame_nd.numpy()) if hasattr(frame_nd, 'numpy') else torch.tensor(frame_nd)
+                    # (H, W, C) -> (C, H, W)
+                    frame = frame.permute(2, 0, 1).contiguous() / 255.0
+                    av_frame = frame
+                    for new_frame in get_new_frames(frame_callback(av_frame)):
+                        new_frame = reformatter(new_frame)
+                        # Convert back to (H, W, C) uint8 for StreamWriter
+                        arr = new_frame.to_ndarray(format=pix_fmt)
+                        arr = torch.from_numpy(arr)
+                        if arr.dtype != torch.uint8:
+                            arr = arr.to(torch.uint8)
+                        if arr.shape[0] == 3:
+                            arr = arr.permute(1, 2, 0).contiguous()
+                        arr = arr.unsqueeze(0)  # add batch dim
+                        sw.write_video_chunk(0, arr)
+                        pbar.update(1)
+            if audio_chunk is not None and audio_stream_idx is not None:
+                # audio_chunk: (frames, channels)
+                sw.write_audio_chunk(1, audio_chunk)
+            if suspend_event is not None:
+                suspend_event.wait()
+            if stop_event is not None and stop_event.is_set():
+                break
+        # Flush video (no explicit flush needed for StreamWriter)
+        for new_frame in get_new_frames(frame_callback(None)):
+            new_frame = reformatter(new_frame)
+            arr = new_frame.to_ndarray(format=pix_fmt)
+            arr = torch.from_numpy(arr)
+            if arr.dtype != torch.uint8:
+                arr = arr.to(torch.uint8)
+            if arr.shape[0] == 3:
+                arr = arr.permute(1, 2, 0).contiguous()
+            arr = arr.unsqueeze(0)
+            sw.write_video_chunk(0, arr)
+            pbar.update(1)
+        pbar.close()
+        if not (stop_event is not None and stop_event.is_set()):
+            if path.exists(output_path_tmp):
+                try_replace(output_path_tmp, output_path)
+        return
+    # --- original PyAV code path ---
+    input_container = av.open(input_path)
     if input_container.duration:
         container_duration = float(input_container.duration / av.time_base)
     else:
@@ -683,7 +822,11 @@ def process_video(input_path, output_path,
     # has audio stream
     audio_input_streams = [s for s in input_container.streams.audio]
     subtitle_input_streams = [s for s in input_container.streams.subtitles]
-
+    """
+    attachments_input_streams = [s for s in input_container.streams.attachments]
+    data_input_streams = [s for s in input_container.streams.data]
+    other_input_streams = [s for s in input_container.streams.other]
+    """
     config = config_callback(video_input_stream)
     config.fps = convert_known_fps(config.fps)
     config.output_fps = convert_known_fps(config.output_fps)
@@ -743,13 +886,36 @@ def process_video(input_path, output_path,
 
     subtitle_output_streams = []
     for subtitle_input_stream in subtitle_input_streams:
-        subtitle_output_stream = output_container.add_stream(template=subtitle_input_stream)
+        subtitle_output_stream = add_stream_from_template(output_container, template=subtitle_input_stream)
         if subtitle_input_stream.metadata is not None:
             for key, value in subtitle_input_stream.metadata.items():
                 subtitle_output_stream.metadata[key] = value
         subtitle_output_streams.append((subtitle_input_stream, subtitle_output_stream))
+    """
+    attachments_output_streams = []
+    for attachments_input_stream in attachments_input_streams:
+        attachments_output_stream = output_container.add_data_stream()
+        if attachments_input_stream.metadata is not None:
+            for key, value in attachments_input_stream.metadata.items():
+                attachments_output_stream.metadata[key] = value
+        attachments_output_streams.append((attachments_input_stream, attachments_output_stream))
 
+    data_output_streams = []
+    for data_input_stream in data_input_streams:
+        data_output_stream = output_container.add_data_stream()
+        if data_input_stream.metadata is not None:
+            for key, value in data_input_stream.metadata.items():
+                data_output_stream.metadata[key] = value
+        data_output_streams.append((data_input_stream, data_output_stream))
 
+    other_output_streams = []
+    for other_input_stream in other_input_streams:
+        other_output_stream = output_container.add_data_stream()
+        if other_input_stream.metadata is not None:
+            for key, value in other_input_stream.metadata.items():
+                other_output_stream.metadata[key] = value
+        other_output_streams.append((other_input_stream, other_output_stream))
+    """
     desc = (title if title else input_path)
     ncols = len(desc) + 60
     tqdm_fn = tqdm_fn or tqdm
@@ -757,21 +923,21 @@ def process_video(input_path, output_path,
     total = guess_frames(video_input_stream, output_fps, start_time=start_time, end_time=end_time,
                          container_duration=container_duration)
     pbar = tqdm_fn(desc=desc, total=total, ncols=ncols)
-    streams = [video_input_stream] + [s[0] for s in audio_output_streams] + [s[0] for s in subtitle_output_streams]
+    streams = [video_input_stream] + [s[0] for s in audio_output_streams] + [s[0] for s in subtitle_output_streams] #+ [s[0] for s in attachments_output_streams] + [s[0] for s in data_output_streams] + [s[0] for s in other_output_streams]
 
     ctx = video_input_stream.codec_context
-    cuvid_dec_test=False
+    cuvid_dec_test = False
 
     if((video_input_stream.codec.name+'_cuvid') in av.codec.codecs_available):
         ctx = av.Codec((video_input_stream.codec.name+'_cuvid'), 'r').create()
         ctx.extradata = video_input_stream.codec_context.extradata
         video_input_stream.thread_type = "AUTO"
-        cuvid_dec_test=True
+        cuvid_dec_test = True
     if(video_input_stream.codec.name == 'libdav1d' and 'av1_cuvid' in av.codec.codecs_available):
         ctx = av.Codec(('av1_cuvid'), 'r').create()
         ctx.extradata = video_input_stream.codec_context.extradata
         video_input_stream.thread_type = "AUTO"
-        cuvid_dec_test=True
+        cuvid_dec_test = True
 
     for packet in input_container.demux(streams):
         if packet.pts is not None:
@@ -784,7 +950,7 @@ def process_video(input_path, output_path,
                 except:
                     ctx = video_input_stream.codec_context
                 finally:
-                    cuvid_dec_test=False
+                    cuvid_dec_test = False
             for frame in ctx.decode(packet):
                 frame = fps_filter.update(frame)
                 if frame is not None:
@@ -816,6 +982,23 @@ def process_video(input_path, output_path,
                 if packet.stream == subtitle_input_stream:
                     packet.stream = subtitle_output_stream
                     output_container.mux(packet)
+        """
+        elif packet.stream.type == "attachments":
+            for attachments_input_stream, attachments_output_stream in attachments_output_streams:
+                if packet.stream == attachments_input_stream:
+                    packet.stream = attachments_output_stream
+                    output_container.mux(packet)
+        elif packet.stream.type == "data":
+            for data_input_stream, data_output_stream in data_output_streams:
+                if packet.stream == data_input_stream:
+                    packet.stream = data_output_stream
+                    output_container.mux(packet)
+        elif packet.stream.type == "other":
+            for other_input_stream, other_output_stream in other_output_streams:
+                if packet.stream == other_input_stream:
+                    packet.stream = other_output_stream
+                    output_container.mux(packet)
+        """
         if suspend_event is not None:
             suspend_event.wait()
         if stop_event is not None and stop_event.is_set():
@@ -1184,12 +1367,13 @@ class FrameCallbackPool():
     thread pool callback wrapper
     """
     def __init__(self, frame_callback, batch_size, device, max_workers=1, max_batch_queue=2,
-                 require_pts=False, skip_pts=-1):
+                 require_pts=False, skip_pts=-1, require_flush=False):
         if max_workers > 0:
             self.thread_pool = ThreadPoolExecutor(max_workers=max_workers)
         else:
             self.thread_pool = _DummyThreadPool()
         self.require_pts = require_pts
+        self.require_flush = require_flush
         self.skip_pts = skip_pts
         self.frame_callback = frame_callback
         self.batch_size = batch_size
@@ -1203,6 +1387,16 @@ class FrameCallbackPool():
         self.pts_batch_queue = []
         self.futures = []
 
+    def make_args(self, batch, pts_batch, flush):
+        if self.require_pts and self.require_flush:
+            return (batch, pts_batch, flush)
+        elif self.require_pts:
+            return (batch, pts_batch)
+        elif self.require_flush:
+            return (batch, flush)
+        else:
+            return (batch,)
+
     def __call__(self, frame):
         if False:
             # for debug
@@ -1215,10 +1409,11 @@ class FrameCallbackPool():
 
         if frame is None:
             return self.finish()
-        if frame.pts <= self.skip_pts:
-            return None
+        if not isinstance(frame, torch.Tensor):
+            if frame.pts <= self.skip_pts:
+                return None
 
-        self.pts_queue.append(frame.pts)
+            self.pts_queue.append(frame.pts)
         frame = to_tensor(frame, device=self.devices[self.round_robin_index % len(self.devices)])
 
         self.frame_queue.append(frame)
@@ -1234,10 +1429,12 @@ class FrameCallbackPool():
             if len(self.futures) < self.max_workers or self.max_workers <= 0:
                 batch = self.batch_queue.pop(0)
                 pts_batch = self.pts_batch_queue.pop(0)
+                args = [batch]
                 if self.require_pts:
-                    future = self.thread_pool.submit(self.frame_callback, batch, pts_batch)
-                else:
-                    future = self.thread_pool.submit(self.frame_callback, batch)
+                    args.append(pts_batch)
+                if self.require_flush:
+                    args.append(False)
+                future = self.thread_pool.submit(self.frame_callback, *self.make_args(batch, pts_batch, False))
                 self.futures.append(future)
             if len(self.batch_queue) >= self.max_batch_queue and self.futures:
                 future = self.futures.pop(0)
@@ -1264,10 +1461,7 @@ class FrameCallbackPool():
             if len(self.futures) < self.max_workers or self.max_workers <= 0:
                 batch = self.batch_queue.pop(0)
                 pts_batch = self.pts_batch_queue.pop(0)
-                if self.require_pts:
-                    future = self.thread_pool.submit(self.frame_callback, batch, pts_batch)
-                else:
-                    future = self.thread_pool.submit(self.frame_callback, batch)
+                future = self.thread_pool.submit(self.frame_callback, *self.make_args(batch, pts_batch, False))
                 self.futures.append(future)
             else:
                 future = self.futures.pop(0)
@@ -1279,6 +1473,13 @@ class FrameCallbackPool():
             frames = future.result()
             if frames is not None:
                 frame_remains += [to_frame(frame) for frame in frames]
+
+        if self.require_flush:
+            future = self.thread_pool.submit(self.frame_callback, *self.make_args(None, None, True))
+            frames = future.result()
+            if frames is not None:
+                frame_remains += [to_frame(frame) for frame in frames]
+
         return frame_remains
 
     def shutdown(self):

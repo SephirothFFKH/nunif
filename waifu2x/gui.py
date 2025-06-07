@@ -1,4 +1,5 @@
 import nunif.pythonw_fix  # noqa
+import nunif.gui.subprocess_patch  # noqa
 import locale
 import sys
 import os
@@ -233,7 +234,7 @@ class MainFrame(wx.Frame):
         if torch.cuda.is_available():
             for i in range(torch.cuda.device_count()):
                 device_name = torch.cuda.get_device_properties(i).name
-                self.cbo_device.Append(device_name, i)
+                self.cbo_device.Append(f"{i}:{device_name}", i)
             if torch.cuda.device_count() > 0:
                 self.cbo_device.Append(T("All CUDA Device"), -2)
         elif mps_is_available():
@@ -241,7 +242,7 @@ class MainFrame(wx.Frame):
         elif xpu_is_available():
             for i in range(torch.xpu.device_count()):
                 device_name = torch.xpu.get_device_name(i)
-                self.cbo_device.Append(device_name, i)
+                self.cbo_device.Append(f"{i}:{device_name}", i)
 
         self.cbo_device.Append("CPU", -1)
         self.cbo_device.SetSelection(0)
@@ -617,7 +618,7 @@ class MainFrame(wx.Frame):
             pass
 
 
-LOCALE_DICT = LOCALES.get(locale.getlocale()[0], {})
+LOCALE_DICT = LOCALES.get(locale.getdefaultlocale()[0], {})
 LOCALE_DICT_EN = LOCALES["en_US"]
 
 
@@ -634,7 +635,7 @@ def main():
     import sys
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--lang", type=str, help="lang, ja_JP, en_US")
+    parser.add_argument("--lang", type=str, choices=list(LOCALES.keys()), help="translation language")
     args = parser.parse_args()
     if args.lang:
         global LOCALE_DICT
