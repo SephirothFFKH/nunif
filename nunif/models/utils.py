@@ -125,7 +125,7 @@ def compile_model(model, **kwargs):
     if not is_compiled_model(model) and check_compile_support(get_model_device(model)):
         logger.debug(f"compile {model.__class__.__name__}, kwargs={kwargs}")
         #model = torch.compile(model)
-        model = torch.compile(model, backend="tensorrt", options={"optimization_level": 5, "tiling_optimization_level": "moderate", "require_full_compilation": True, "use_fast_partitioner": False, "sparse_weights": True, "truncate_double": True, "enable_experimental_decompositions ": True, "min_block_size": 0, "cache_built_engines": True, "reuse_cached_engines": True, "engine_cache_dir": "trt_engine_cache", "engine_cache_size": 10737418240,}, **kwargs)
+        model = torch.compile(model, backend="tensorrt", options={"optimization_level": 5, "tiling_optimization_level": "fast", "require_full_compilation": True, "use_fast_partitioner": False, "sparse_weights": True, "truncate_double": True, "enable_experimental_decompositions ": True, "min_block_size": 0, "cache_built_engines": True, "reuse_cached_engines": True, "engine_cache_dir": "trt_engine_cache", "engine_cache_size": 10737418240,}, **kwargs)
     return model
 
 
