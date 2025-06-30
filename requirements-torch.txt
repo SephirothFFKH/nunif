@@ -12,3 +12,6 @@ torchvision==0.22.1+cu128; sys_platform == "linux"
 # Windows
 torch==2.7.1+cu128; sys_platform == "win32"
 torchvision==0.22.1+cu128; sys_platform == "win32"
+torchaudio==2.7.1+cu128; sys_platform == "win32"
+torch-tensorrt; sys_platform == "win32"
+tensorrt; sys_platform == "win32"
